@@ -10,6 +10,35 @@
 #include <string>
 #include <vector>
 
+struct Sample
+{
+   std::string name;
+   size_t length = 0;
+   int fine_tune = 0;
+   int volume = 0;
+   int loop_start = 0;
+   int loop_length = 0; 
+   int8_t* data = nullptr;
+};
+struct Note
+{
+    int note:11;        // 0-??  = 11 bits = 0-2048 should be plenty for your needs.
+    uint8_t number:5;  // 0-31  = 5 bits
+    uint8_t effect;    // 0-15  = 4 bits, but use 8 to keep things even
+    uint8_t eparm;     // 0-255 = 8 bits
+};
+
+struct Mod
+{
+    int nPatterns = 0;
+    int nChannels = 0;
+    int songLength = 0;
+    std::string name;
+    std::vector<Sample> samples;
+    std::vector<int> order;
+    Note* patternData = nullptr;
+} gMod;
+
 template<typename T> T Max(T a,T b) { return a > b ? a : b; }
 template<typename T> T Min(T a,T b) { return a < b ? a : b; }
 
@@ -99,6 +128,8 @@ void producerThread()
 {
     printf("Starting worker thread.\n");
 
+    int currentSample = 0;
+    int samplePos = 0;
     float leftPhase = 0.0f;
     float rightPhase = 0.0f;
     while(!gExit)
@@ -109,9 +140,33 @@ void producerThread()
             if( !gWakeCv.wait_until(lk,now + std::chrono::milliseconds(200), []() -> bool { return gWake; } ) )
                 printf("Wait timeout...\n");
         }
-        printf("Waking up...\n");
+        //printf("Waking up...\n");
+        if(gMod.samples.size() < 31) continue;
+
+        int samplesProduced = 0;
+        while(samplesProduced < 1024)
+        {
+            Sample& s = gMod.samples[currentSample];
+
+            for( ; samplePos < s.length; ++samplePos)
+            {
+                float val = (float)(s.data[samplePos] / 128.f);
+                if( !gOutput.push(val))
+                    break;
+                if( !gOutput.push(val))
+                    break;
+                samplesProduced+=2;
+            }
+            if( samplePos >= s.length)
+            {
+                samplePos = 0;
+                currentSample = (currentSample +1) % 31;
+                printf("sample=%d\n", currentSample);
+            }
+        }
 
         // produce some samples...
+        /*
         for( int i = 0; i < 1024; ++i)
         {
             leftPhase += 0.03f;
@@ -121,7 +176,7 @@ void producerThread()
                 
             if(!gOutput.push(leftPhase)) break;
             if(!gOutput.push(rightPhase)) break;
-        }
+        }*/
         gWake = false;
     }
 
@@ -174,28 +229,9 @@ static int patestCallback( const void *inputBuffer, void *outputBuffer,
 }
 
 #define ERR_WRAP(mac_err) do { result = mac_err ; line = __LINE__ ; if ( result != paNoError ) goto error; } while(0)
-#define SAMPLE_RATE (44100)
+#define SAMPLE_RATE (22000)
 #define NUM_SECONDS (10)
 
-struct Sample
-{
-   std::string name;
-   size_t length = 0;
-   int fine_tune = 0;
-   int volume = 0;
-   int loop_start = 0;
-   int loop_length = 0; 
-};
-
-struct Mod
-{
-    int nPatterns = 0;
-    int nChannels = 0;
-    int songLength = 0;
-    std::string name;
-    std::vector<Sample> samples;
-    std::vector<int> order;
-} gMod;
 
 int getChannelCount(const void* mem, size_t size)
 {
@@ -219,6 +255,7 @@ bool loadMod(void* mem, size_t size)
     // channels.
     int nChannels = getChannelCount(mem,size);
     if(!nChannels) return false; // valid?
+    gMod.nChannels = nChannels;
 
     // name.    
     char name[21] = {0};
@@ -267,6 +304,7 @@ bool loadMod(void* mem, size_t size)
             printf("%d, name='%s', length=%d, finetune=%d, vol=%d, loopstart=%d, looplength=%d\n", 
                 i, name, (int)s.length, s.fine_tune, s.volume, s.loop_start, s.loop_length);
         }
+        gMod.samples.push_back(std::move(s));
     }
 
     // song length
@@ -286,6 +324,44 @@ bool loadMod(void* mem, size_t size)
        printf("order=%d -> %u\n", i, order);
     }
     printf("nPatterns=%d\n", gMod.nPatterns);
+
+    gMod.patternData = (Note*)malloc(64 * gMod.nChannels * sizeof(Note) * (gMod.nPatterns+1));
+
+    uint32_t* patterns = (uint32_t*)sampleInfoState;
+    for(int i = 0; i< gMod.nPatterns; ++i)
+    {
+        Note* note = &gMod.patternData[(gMod.nChannels * 64 * i)];
+        for(int j = 0; j < gMod.nChannels * 64; j++)
+        {
+            uint32_t packed = *patterns++;
+            //store SAMPLE_NUMBER as    (byte0 AND 0F0h) + (byte2 SHR 4)
+            note->number = (packed & 0xf0) + ((packed >> (16+4)) & 0xff);
+
+            //- store PERIOD_FREQUENCY as ((byte0 AND 0Fh) SHL 8) + byte1;
+            uint32_t freq = ((packed & 0xf) << 8) + ((packed >> 8) & 0xff);
+            
+            //- store EFFECT_NUMBER as    byte2 AND 0Fh
+            note->effect = (packed >> 16) & 0xf;
+
+            //- store EFFECT_PARAMETER as byte 3
+            note->eparm = (packed >> 24) & 0xff;
+
+            note++;  
+        }
+    }
+
+    // Load sample data.
+    uint8_t* sampleData = (uint8_t*)patterns;
+    for(int i = 0; i < 31; ++i)
+    {
+        Sample& s = gMod.samples[i];
+        if( s.length > 0 )
+        {
+            s.data = (int8_t*)malloc(s.length);
+            memcpy(s.data, sampleData, s.length);
+            sampleData += s.length;
+        }
+    }
 
     // good.
     return true;
