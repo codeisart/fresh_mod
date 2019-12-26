@@ -7,6 +7,8 @@
 #include <condition_variable>
 #include <atomic>
 #include <chrono>
+#include <string>
+#include <vector>
 
 template<typename T> T Max(T a,T b) { return a > b ? a : b; }
 template<typename T> T Min(T a,T b) { return a < b ? a : b; }
@@ -175,8 +177,149 @@ static int patestCallback( const void *inputBuffer, void *outputBuffer,
 #define SAMPLE_RATE (44100)
 #define NUM_SECONDS (10)
 
+struct Sample
+{
+   std::string name;
+   size_t length = 0;
+   int fine_tune = 0;
+   int volume = 0;
+   int loop_start = 0;
+   int loop_length = 0; 
+};
+
+struct Mod
+{
+    int nPatterns = 0;
+    int nChannels = 0;
+    int songLength = 0;
+    std::string name;
+    std::vector<Sample> samples;
+    std::vector<int> order;
+} gMod;
+
+int getChannelCount(const void* mem, size_t size)
+{
+    if( size <= 1084 ) return 0;
+    uint32_t id = *(const uint32_t*)((uint8_t*)mem + 1080);
+    static const uint32_t k4Chan = '.K.M';
+    static const uint32_t k6Chan = 'NHC6';
+    static const uint32_t k8Chan = 'NHC8';
+    
+    switch(id)
+    {
+        case k4Chan: return 4;
+        case k6Chan: return 6;
+        case k8Chan: return 8;
+    }
+    return 0;
+}
+
+bool loadMod(void* mem, size_t size)
+{
+    // channels.
+    int nChannels = getChannelCount(mem,size);
+    if(!nChannels) return false; // valid?
+
+    // name.    
+    char name[21] = {0};
+    memcpy(name, mem, 20);
+    gMod.name = name;
+    printf("loading '%d' channel mod '%s'\n", nChannels, name);
+
+    // sample info.
+    uint8_t* sampleInfoState = (uint8_t*)mem+20; 
+    for(int i = 0; i < 31; ++i)
+    {
+        Sample s;
+
+        // name
+        char name[23] = {0};
+        memcpy(name, sampleInfoState, 22);
+        s.name = name;
+        sampleInfoState += 22;
+
+        // length.
+        uint16_t packed = *(uint16_t*)sampleInfoState;        
+        s.length = ((packed & 0xff) * 0x100) + (packed>>8);
+        sampleInfoState+=2;
+
+        // fine tune.
+        s.fine_tune = *(uint8_t*)sampleInfoState;
+        if(s.fine_tune > 7) s.fine_tune -= 16;
+        sampleInfoState+=1;
+
+        // volume.
+        s.volume = *(uint8_t*)sampleInfoState;
+        sampleInfoState+=1; 
+
+        // loop start.
+        packed = *(uint16_t*)sampleInfoState;   
+        s.loop_start = ((packed & 0xff) * 0x100) + (packed>>8);
+        sampleInfoState+=2;
+
+        // loop length
+        packed = *(uint16_t*)sampleInfoState;   
+        s.loop_length = ((packed & 0xff) * 0x100) + (packed>>8);
+        sampleInfoState+=2; 
+        
+        if( s.length )
+        {
+            printf("%d, name='%s', length=%d, finetune=%d, vol=%d, loopstart=%d, looplength=%d\n", 
+                i, name, (int)s.length, s.fine_tune, s.volume, s.loop_start, s.loop_length);
+        }
+    }
+
+    // song length
+    gMod.songLength = *(uint8_t*)sampleInfoState;
+    sampleInfoState+=1;
+    
+    // Skip unused.
+    sampleInfoState+=1;
+
+    // Order table.
+    for(int i = 0; i < 128; ++i)
+    {
+       uint8_t order = *(uint8_t*)sampleInfoState;
+       if( order > gMod.nPatterns) gMod.nPatterns = order;
+       gMod.order.push_back(order);
+       sampleInfoState++;
+       printf("order=%d -> %u\n", i, order);
+    }
+    printf("nPatterns=%d\n", gMod.nPatterns);
+
+    // good.
+    return true;
+}
+
+bool loadMod(const char* filename)
+{
+    if( FILE* fp = fopen(filename, "rb") )
+    {
+        fseek(fp,  0, SEEK_END);
+        size_t size = ftell(fp);
+        void* mem = malloc(size);
+        fseek(fp,0, SEEK_SET);
+        fread(mem, size, 1, fp);
+        bool bSuccess = loadMod(mem, size);
+        free(mem);
+        return bSuccess;
+    }
+    return false;
+}
+
 int main(int argc, char** argv)
 {
+    if( argc <= 1 )
+    {
+        printf("please supply a mod filename.\n");
+        return -1;
+    }
+    if( !loadMod(argv[1]))
+    {
+        printf("failed to load mod file '%s'\n", argv[1]);
+        return -1;
+    }
+
     std::thread r(producerThread);
     r.detach();
 
