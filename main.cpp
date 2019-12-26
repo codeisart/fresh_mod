@@ -91,19 +91,36 @@ static std::atomic<bool> gExit;
 static std::atomic<bool> gWake;
 static std::condition_variable gWakeCv;
 static std::mutex m;
+RingBuffer<float> gOutput(1024*2);
 
 void producerThread()
 {
     printf("Starting worker thread.\n");
 
+    float leftPhase = 0.0f;
+    float rightPhase = 0.0f;
     while(!gExit)
     {
         {
             std::unique_lock<std::mutex> lk(m);
             auto now = std::chrono::system_clock::now();
-            gWakeCv.wait_until(lk,now + std::chrono::milliseconds(1000), []() -> bool { return gWake; } );
+            if( !gWakeCv.wait_until(lk,now + std::chrono::milliseconds(200), []() -> bool { return gWake; } ) )
+                printf("Wait timeout...\n");
         }
-        printf("Waking up..\n");
+        printf("Waking up...\n");
+
+        // produce some samples...
+        for( int i = 0; i < 1024; ++i)
+        {
+            leftPhase += 0.03f;
+            if( leftPhase >= 1.0f ) leftPhase -= 2.0f;
+            rightPhase += 0.01f;
+            if( rightPhase >= 1.0f ) rightPhase -= 2.0f;
+                
+            if(!gOutput.push(leftPhase)) break;
+            if(!gOutput.push(rightPhase)) break;
+        }
+        gWake = false;
     }
 
     printf("Exiting worker thread.\n");
@@ -127,6 +144,7 @@ static int patestCallback( const void *inputBuffer, void *outputBuffer,
     unsigned int i;
     (void) inputBuffer; /* Prevent unused variable warning. */
     
+    int starvedSamples = 0;
     for( i=0; i<framesPerBuffer; i++ )
     {
         if( buff->num() >= 2)
@@ -136,10 +154,20 @@ static int patestCallback( const void *inputBuffer, void *outputBuffer,
         }
         else
         {
+            starvedSamples+=2;
             *out++ = 0.0f;
             *out++ = 0.0f; 
         }
     }
+
+    if( starvedSamples)
+    {
+        printf("We starved for %d samples\n", starvedSamples);
+    }
+
+    // Wake producer thread.
+    gWake = true;
+    gWakeCv.notify_all();
     return 0;
 }
 
@@ -158,20 +186,10 @@ int main(int argc, char** argv)
     PaError err,result;
     int line;
     int sampleCount = 44000*10;
-    RingBuffer<float> output(sampleCount);
-    //CircBuff output(sampleCount * sizeof(float) * 2);    // 512 samples * 2 channels * sizeof(float).
+  
     PaStream *stream = 0;
 
-    float phase = 0.0f;
-    for( int i = 0; i < sampleCount; ++i)
-    {
-        phase += 0.03f;
-        if( phase >= 1.0f ) 
-            phase -= 2.0f;
-               
-        output.push(phase);
-        output.push(phase);
-    }
+    
 
     ERR_WRAP(Pa_Initialize());
 
@@ -181,7 +199,8 @@ int main(int argc, char** argv)
                                 2,          /* stereo output */
                                 paFloat32,  /* 32 bit floating point output */
                                 SAMPLE_RATE,
-                                256,        /* frames per buffer, i.e. the number
+                                paFramesPerBufferUnspecified,        
+                                                    /* frames per buffer, i.e. the number
                                                    of sample frames that PortAudio will
                                                    request from the callback. Many apps
                                                    may want to use
@@ -189,7 +208,7 @@ int main(int argc, char** argv)
                                                    tells PortAudio to pick the best,
                                                    possibly changing, buffer size.*/
                                 patestCallback, /* this is your callback function */
-                                &output )); /*This is a pointer that will be passed to
+                                &gOutput )); /*This is a pointer that will be passed to
                                                    your callback*/
 
     ERR_WRAP(Pa_StartStream( stream ));
