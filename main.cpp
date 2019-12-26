@@ -144,13 +144,13 @@ void producerThread()
         if(gMod.samples.size() < 31) continue;
 
         int samplesProduced = 0;
-        while(samplesProduced < 1024)
+        while(gOutput.space() > 0)
         {
             Sample& s = gMod.samples[currentSample];
 
             for( ; samplePos < s.length; ++samplePos)
             {
-                float val = (float)(s.data[samplePos] / 128.f);
+                float val = (float)(s.data[samplePos] / 256.f);
                 if( !gOutput.push(val))
                     break;
                 if( !gOutput.push(val))
@@ -277,7 +277,7 @@ bool loadMod(void* mem, size_t size)
 
         // length.
         uint16_t packed = *(uint16_t*)sampleInfoState;        
-        s.length = ((packed & 0xff) * 0x100) + (packed>>8);
+        s.length = (((packed & 0xff) * 0x100) + (packed>>8)) * 2;
         sampleInfoState+=2;
 
         // fine tune.
@@ -291,17 +291,17 @@ bool loadMod(void* mem, size_t size)
 
         // loop start.
         packed = *(uint16_t*)sampleInfoState;   
-        s.loop_start = ((packed & 0xff) * 0x100) + (packed>>8);
+        s.loop_start = (((packed & 0xff) * 0x100) + (packed>>8)) * 2;
         sampleInfoState+=2;
 
         // loop length
         packed = *(uint16_t*)sampleInfoState;   
-        s.loop_length = ((packed & 0xff) * 0x100) + (packed>>8);
+        s.loop_length = (((packed & 0xff) * 0x100) + (packed>>8)) * 2;
         sampleInfoState+=2; 
         
         if( s.length )
         {
-            printf("%d, name='%s', length=%d, finetune=%d, vol=%d, loopstart=%d, looplength=%d\n", 
+            printf("%d, name='%s', length=0x%x, finetune=%d, vol=%d, loopstart=%d, looplength=%d\n", 
                 i, name, (int)s.length, s.fine_tune, s.volume, s.loop_start, s.loop_length);
         }
         gMod.samples.push_back(std::move(s));
@@ -404,7 +404,6 @@ int main(int argc, char** argv)
 
     PaError err,result;
     int line;
-    int sampleCount = 44000*10;
   
     PaStream *stream = 0;
 
