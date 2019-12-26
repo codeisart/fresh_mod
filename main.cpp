@@ -1,12 +1,115 @@
 #include "portaudio.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <memory.h>
+#include <assert.h>
+#include <thread>         // std::thread
+#include <condition_variable>
+#include <atomic>
+#include <chrono>
 
-typedef struct
+template<typename T> T Max(T a,T b) { return a > b ? a : b; }
+template<typename T> T Min(T a,T b) { return a < b ? a : b; }
+
+template<typename T>
+struct RingBuffer
 {
-    float left_phase;
-    float right_phase;
-}   
-paTestData;
+    int head, tail, size;
+    T* buff;
+    RingBuffer(int InSize) : buff(new T[InSize]), head(0), tail(0), size(InSize) {}
+    ~RingBuffer() { delete[] buff; }
+    int increment(int i, int amnt=1) { return (i+amnt)%size; }  
+    bool push(const T& v) 
+    { 
+        int next = increment(head);
+        if( next == tail) return false; // overflow
+        buff[head] = v; 
+        head=next;
+        return true;
+    }  
+    T pop() { T v = buff[tail]; tail=increment(tail); return v; }
+    int num() const { return head >= tail ? head-tail : (head+size)-tail; }
+    int space() const { return size - num(); }
+};
+
+void testCircbuffer()
+{
+    // test 1. write 
+    {
+        //CircBuff a(100 * sizeof(float));
+        RingBuffer<float> a(2);
+        assert(a.num() == 0);
+        a.push(0.12345f); 
+        assert(a.num() == 1);
+        float tmp = a.pop();
+        assert(tmp == 0.12345f);
+    }
+    // test 2. write a bunch.
+    {
+       RingBuffer<float> a(8);
+       for(int i = 0; i < 200; ++i)
+        {
+            assert(a.num() == 0);
+            a.push(0.12345f);
+            assert(a.num() == 1);
+            float tmp = a.pop();
+            assert(tmp == 0.12345f);
+        } 
+    }
+
+    // test 3. 
+    {
+        RingBuffer<float> a(128);
+        while(a.space())
+        {
+            a.push(0.12345f); 
+        } 
+        while(a.num())
+        {
+            float tmp = a.pop();
+            assert(tmp == 0.12345f); 
+        }
+    }
+
+     // test 4. 
+    {
+        RingBuffer<float> a(128);
+        for( int i = 0; i < 64; ++i )
+        {
+            a.push((float)i);    
+            assert(a.num() == i);
+        }
+        for( int i=0; i < 64; ++i)
+        {
+            float tmp = a.pop();
+            assert(tmp == (float)i); 
+        }
+    }
+}
+
+static std::atomic<bool> gExit;
+static std::atomic<bool> gWake;
+static std::condition_variable gWakeCv;
+static std::mutex m;
+
+void producerThread()
+{
+    printf("Starting worker thread.\n");
+
+    while(!gExit)
+    {
+        {
+            std::unique_lock<std::mutex> lk(m);
+            auto now = std::chrono::system_clock::now();
+            gWakeCv.wait_until(lk,now + std::chrono::milliseconds(1000), []() -> bool { return gWake; } );
+        }
+        printf("Waking up..\n");
+    }
+
+    printf("Exiting worker thread.\n");
+}
+
+
 /* This routine will be called by the PortAudio engine when audio is needed.
    It may called at interrupt level on some machines so don't do anything
    that could mess up the system like calling malloc() or free().
@@ -18,22 +121,24 @@ static int patestCallback( const void *inputBuffer, void *outputBuffer,
                            void *userData )
 {
     /* Cast data passed through stream to our structure. */
-    paTestData *data = (paTestData*)userData; 
+    //CircBuff *buff = (CircBuff*)userData; 
+    RingBuffer<float>* buff = (RingBuffer<float>*)userData;
     float *out = (float*)outputBuffer;
     unsigned int i;
     (void) inputBuffer; /* Prevent unused variable warning. */
     
     for( i=0; i<framesPerBuffer; i++ )
     {
-        *out++ = data->left_phase;  /* left */
-        *out++ = data->right_phase;  /* right */
-        /* Generate simple sawtooth phaser that ranges between -1.0 and 1.0. */
-        data->left_phase += 0.01f;
-        /* When signal reaches top, drop back down. */
-        if( data->left_phase >= 1.0f ) data->left_phase -= 2.0f;
-        /* higher pitch so we can distinguish left and right. */
-        data->right_phase += 0.03f;
-        if( data->right_phase >= 1.0f ) data->right_phase -= 2.0f;
+        if( buff->num() >= 2)
+        {
+            *out++ = buff->pop();
+            *out++ = buff->pop(); 
+        }
+        else
+        {
+            *out++ = 0.0f;
+            *out++ = 0.0f; 
+        }
     }
     return 0;
 }
@@ -44,10 +149,29 @@ static int patestCallback( const void *inputBuffer, void *outputBuffer,
 
 int main(int argc, char** argv)
 {
+    std::thread r(producerThread);
+    r.detach();
+
+    //testCircbuffer();
+    //return 0;
+
     PaError err,result;
     int line;
-    paTestData data = {0};
+    int sampleCount = 44000*10;
+    RingBuffer<float> output(sampleCount);
+    //CircBuff output(sampleCount * sizeof(float) * 2);    // 512 samples * 2 channels * sizeof(float).
     PaStream *stream = 0;
+
+    float phase = 0.0f;
+    for( int i = 0; i < sampleCount; ++i)
+    {
+        phase += 0.03f;
+        if( phase >= 1.0f ) 
+            phase -= 2.0f;
+               
+        output.push(phase);
+        output.push(phase);
+    }
 
     ERR_WRAP(Pa_Initialize());
 
@@ -65,7 +189,7 @@ int main(int argc, char** argv)
                                                    tells PortAudio to pick the best,
                                                    possibly changing, buffer size.*/
                                 patestCallback, /* this is your callback function */
-                                &data )); /*This is a pointer that will be passed to
+                                &output )); /*This is a pointer that will be passed to
                                                    your callback*/
 
     ERR_WRAP(Pa_StartStream( stream ));
@@ -75,6 +199,11 @@ int main(int argc, char** argv)
     ERR_WRAP(Pa_StopStream( stream ));
 
     ERR_WRAP(Pa_Terminate());
+    {
+        gWake = true;
+        gExit = true;
+        gWakeCv.notify_all();
+    }
     return 0;
 
 error:
