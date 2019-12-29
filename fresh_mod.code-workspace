@@ -4,5 +4,33 @@
 			"path": "."
 		}
 	],
-	"settings": {}
+	"settings": {
+		"files.associations": {
+			"thread": "cpp",
+			"__mutex_base": "cpp",
+			"*.tcc": "cpp",
+			"bitset": "cpp",
+			"exception": "cpp",
+			"fstream": "cpp",
+			"istream": "cpp",
+			"limits": "cpp",
+			"memory": "cpp",
+			"ostream": "cpp",
+			"streambuf": "cpp",
+			"algorithm": "cpp",
+			"complex": "cpp",
+			"deque": "cpp",
+			"functional": "cpp",
+			"locale": "cpp",
+			"iosfwd": "cpp",
+			"hashtable": "cpp",
+			"random": "cpp",
+			"typeinfo": "cpp",
+			"cmath": "cpp",
+			"numeric": "cpp",
+			"ratio": "cpp",
+			"condition_variable": "cpp",
+			"chrono": "cpp"
+		}
+	}
 }

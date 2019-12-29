@@ -11,23 +11,18 @@
 #include <vector>
 #include <functional>
 #include <map>
+#include <sstream>
 #include "util.h"
 #include "mod.h"
 
-
 static const char* notestr[] = {"C-", "C#", "D-", "D#","E-", "F-", "F#", "G-","G#","A-", "A#", "B-" };
-uint16_t findNoteFromFreq(uint16_t amigaFreq, int& note, int& oct, int& ft, int tolerance=1);
+uint16_t findOffsetFromPeriod(uint16_t amigaFreq, int& note, int& oct, int& ft, int tolerance=1);
 extern const uint16_t gNotes[];
 #define SAMPLE_RATE (48000)
 #define NUM_SECONDS (60)
 
 static const int kFrameSize = 700;// SAMPLE_RATE /20.f;
 Mod gMod;
-RingBuffer<float> gOutput(kFrameSize*2*2); // stereo double buffered
-std::atomic<bool> gExit;
-std::atomic<bool> gWake;
-std::condition_variable gWakeCv;
-std::mutex m;
 
 void timer_start(std::function<void(void)> func, unsigned int interval)
 {
@@ -42,54 +37,72 @@ void timer_start(std::function<void(void)> func, unsigned int interval)
   }).detach();
 }
 
+void Channel::setSample(Sample* s)
+{
+    sample = s;
+    samplePos = 0;
+}
 
 // render thread.
-int Channel::makeAudio(float *dst, float dstSize, float sampleRate)
+int Channel::makeAudio(
+    std::vector<float>& leftMix,
+    std::vector<float>& rightMix,
+    int frameSize,
+    float sampleRate)
 {
-    if (lastSample)
-        sample = lastSample;
-    if (!sample)
+    if( freq <= 0)
         return 0;
-    if (!sample->data)
+    if( !sample )
         return 0;
-    bool bLooping = sample->loop_length > 0;
+    if( samplePos < 0)
+        return 0;
 
-    float endPos = bLooping ? sample->loop_start + sample->loop_length : sample->length;
-    float freq = getFreqHz(freqOffset, ft);
-    if (freq <= 0.f)
-        freq = 16000;
-    float ratio = (float)freq / sampleRate;
-    static const float k8bitRecp = 1.f / 128.f;
-    static const float kVolRecp = 1.f / 64.f;
+    float srcStep = freq / (double)sampleRate;
 
-    int i = 0;
-    for (; i < dstSize;
-         samplePos += ratio, dst++, i++)
+    float end = sample->loop_length > 0 ?
+                sample->loop_start + sample->loop_length :
+                sample->length;
+
+    float* left = leftMix.data();
+    float* right = rightMix.data();
+    static const float s8ToFloatRecp = 1.f / 127.f;
+
+    int i = 0; 
+    while( i < frameSize )
     {
-        // src.
-        float val = (float)sample->data[(int)samplePos] * k8bitRecp;
-        float gain = (float)vol * kVolRecp;
-        *dst += val * gain;
-
-        if (samplePos >= endPos)
+        // handle end of sample.
+        if( samplePos >= end )
         {
-            // restart loop?
-            if (bLooping)
+            // looping?
+            if( sample->loop_length > 0)
                 samplePos = sample->loop_start;
-            else
+            else 
+            {
+                samplePos = -1.f;
                 break;
+            }
         }
+
+        float s = (float) sample->data[(int)samplePos];
+        s*= s8ToFloatRecp;
+        (*left++) += s;
+        (*right++) += s;
+        
+        samplePos+=srcStep;
+        ++i;
     }
     return i;
 }
 
 void Mod::tick()
 {
-    if (++currentTick >= speed)
+    currentTick++;
+    if (currentTick >= speed)
     {
+        std::unique_lock<std::mutex> lk(cs);
         updateRow();
         currentTick = 0;
-        //currentRow++;
+        currentRow++;
         if( currentRow>= 64)
         {
             currentRow = 0;
@@ -114,8 +127,8 @@ void Mod::updateRow()
         Channel& channel = channels[channelIdx];
         if( note.sampleNumber )
         {
-            Sample* smpl = &samples[note.sampleNumber-1];
-            channel.lastSample = smpl;
+            Sample* smpl = &samples[note.sampleNumber];
+            channel.setSample(smpl);
             channel.setVol(smpl->volume);
             //printf( "chn %d, set sample %d '%s'\n", channelIdx, note.sampleNumber, smpl->name.c_str());  
         }
@@ -123,10 +136,10 @@ void Mod::updateRow()
         {
            if (note.effect != 3 && note.effect != 5) 
            {
-                if( channel.lastSample )
-                    channel.ft = channel.lastSample->fine_tune;
+                //if( channel.lastSample )
+                //    channel.ft = channel.lastSample->fine_tune;
 
-                channel.freqOffset = note.noteOffset + (12*3*channel.ft);
+               // channel.freqOffset = note.noteOffset + (12*3*channel.ft);
            }
         }
 
@@ -136,98 +149,48 @@ void Mod::updateRow()
             // tick sfx.
         }
 
-        if( channel.freqOffset > 0 )
-            channel.setFreq(channel.freqOffset);
-        
-        if(note.noteOffset)
+        if( note.noteOffset )
         {
-            channel.play();
+            channel.setPeriod(note.noteOffset);
         }
-
-        //if( channelIdx == 0) break; // Testing
     }
 }
 
-size_t Mod::makeAudio(RingBuffer<float>* stereoRingBuffer, float sampleRate, int frameSize)
+size_t Mod::makeAudio(
+    std::vector<float>& leftMix,
+    std::vector<float>& rightMix,
+    float sampleRate, 
+    int frameSize)
 {
-    //std::unique_lock<std::mutex> lk(cs);
-
-    //size_t toWrite = Min(stereoRingBuffer->space()/2, frameSize);
-
-    std::vector<float> mixBuffer;
-    mixBuffer.resize(frameSize);
+    std::unique_lock<std::mutex> lk(cs);
+    int o,f,n;
+    int foff=findOffsetFromPeriod(214, o,f,n); // c-5
+    int made = 0;
     for(int i = 0; i < nChannels; ++i)
     {
         Channel& c = channels[i];
-        size_t made = c.makeAudio(mixBuffer.data(), frameSize, sampleRate);
-        //if( i== 0) break; // testing.
+        made = Max(made, c.makeAudio(leftMix, rightMix, frameSize, sampleRate));
     }
 
-    float mix = 0;
-    float gain = (float)1.f / nChannels;
-    int i = 0;
-    for(; i < frameSize; ++i)
+    // Apply master volume.
+    float masterVolRecp = (float)1.f / nChannels;
+    float* l = leftMix.data();
+    float* r = rightMix.data();
+    for( int i = 0; i < frameSize; ++i)
     {
-        float val = mixBuffer[i] * gain;
-        if(!stereoRingBuffer->push(val)) break;
-        if(!stereoRingBuffer->push(val)) break;
-    }
-    return i;
-}
-
-
-void producerThread()
-{
-    printf("Starting worker thread.\n");
-
-    int currentSample = 0;
-    int samplePos = 0;
-    float leftPhase = 0.0f;
-    float rightPhase = 0.0f;
-    int ft = 0, semi, oct;
-    int noteOff = findNoteFromFreq(215,semi, oct, ft);
-    auto lastTickTime = std::chrono::system_clock::now();
-    while(!gExit)
-    {
-        auto loopStart = std::chrono::system_clock::now();
-        {
-            std::unique_lock<std::mutex> lk(m);
-            //if( !gWakeCv.wait_until(lk,loopStart + std::chrono::milliseconds(0), []() -> bool { return gWake; } ) )
-            {
-                //printf("Wait timeout...\n");
-            }
-        }
-
-        //printf("Waking up...\n");
-        if(gMod.samples.size() < 31) continue;
-
-        int samplesProduced = 0;
-        while(samplesProduced < kFrameSize && !gOutput.isFull())
-        {
-            Sample& s = gMod.samples[currentSample];
-            bool bLooping = s.loop_length > 0;
-            
-            samplesProduced += gMod.makeAudio(&gOutput, SAMPLE_RATE, kFrameSize );
-        }
-        gWake = false;
-
-        // Tick if we need to.
-        //auto tickDelta =std::chrono::system_clock::now() - lastTickTime;
-        //if( tickDelta > std::chrono::milliseconds(20) )
-        //{
-        //    lastTickTime = std::chrono::system_clock::now();
-        //    gMod.tick();    
-        //}
+        *l++ *= masterVolRecp;
+        *r++ *= masterVolRecp;
     }
 
-    printf("Exiting worker thread.\n");
+    return made;
 }
-
 
 /* This routine will be called by the PortAudio engine when audio is needed.
    It may called at interrupt level on some machines so don't do anything
    that could mess up the system like calling malloc() or free().
 */ 
+
+
 static int patestCallback( const void *inputBuffer, void *outputBuffer,
                            unsigned long framesPerBuffer,
                            const PaStreamCallbackTimeInfo* timeInfo,
@@ -235,39 +198,23 @@ static int patestCallback( const void *inputBuffer, void *outputBuffer,
                            void *userData )
 {
     /* Cast data passed through stream to our structure. */
-    //CircBuff *buff = (CircBuff*)userData; 
-    RingBuffer<float>* buff = (RingBuffer<float>*)userData;
     float *out = (float*)outputBuffer;
-    unsigned int i;
     (void) inputBuffer; /* Prevent unused variable warning. */
-    
-    int starvedSamples = 0;
-    for( i=0; i<framesPerBuffer; i++ )
-    {
-        if( buff->num() >= 2)
-        {
-            buff->pop(*out++);
-            buff->pop(*out++); 
-        }
-        else
-        {
-            starvedSamples+=2;
-            *out++ = 0.0f;
-            *out++ = 0.0f; 
-        }
-    }
 
-    if( starvedSamples)
-    {
-        printf("We starved for %d samples\n", starvedSamples);
-    }
+    //gMod.tick();
 
-    // Wake producer thread.
-    gWake = true;
-    gWakeCv.notify_all();
+    std::vector<float> leftMix;
+    std::vector<float> rightMix;
+    leftMix.resize(framesPerBuffer);
+    rightMix.resize(framesPerBuffer);
+    gMod.makeAudio(leftMix,rightMix, SAMPLE_RATE, framesPerBuffer);
+    for( int i=0; i<framesPerBuffer; i++ )
+    {
+        *out++ = leftMix[i];
+        *out++ = rightMix[i];
+    }
     return 0;
 }
-
 
 int getChannelCount(const void* mem, size_t size)
 {
@@ -286,6 +233,7 @@ int getChannelCount(const void* mem, size_t size)
     return 0;
 }
 
+
 bool loadMod(void* mem, size_t size)
 {
     // channels.
@@ -303,7 +251,8 @@ bool loadMod(void* mem, size_t size)
 
     // sample info.
     uint8_t* sampleInfoState = (uint8_t*)mem+20; 
-    for(int i = 0; i < 31; ++i)
+    gMod.samples.resize(32);
+    for(int i = 1; i <= 31; ++i)
     {
         Sample s;
 
@@ -346,7 +295,7 @@ bool loadMod(void* mem, size_t size)
             printf("%d, name='%s', length=0x%x, finetune=%d, vol=%d, loopstart=%x, looplength=%x\n", 
                 i, name, (int)s.length, s.fine_tune, s.volume, s.loop_start, s.loop_length);
         }
-        gMod.samples.push_back(std::move(s));
+        gMod.samples[i] = std::move(s);
     }
 
     // song length
@@ -371,7 +320,8 @@ bool loadMod(void* mem, size_t size)
     //- read 4 bytes, discard them (we are at position 1080 again, this is M.K. etc!)
     sampleInfoState+=4;
 
-    gMod.patternData = (Note*)malloc(64 * gMod.nChannels * sizeof(Note) * (gMod.nPatterns+1));
+    size_t patternDataSize = 64 * gMod.nChannels * sizeof(Note) * (gMod.nPatterns+1);
+    gMod.patternData = (Note*)malloc(patternDataSize);
 
     uint32_t* patterns = (uint32_t*)sampleInfoState;
     for(int i = 0; i< gMod.nPatterns; ++i)
@@ -392,7 +342,7 @@ bool loadMod(void* mem, size_t size)
             //- store PERIOD_FREQUENCY as ((byte0 AND 0Fh) SHL 8) + byte1;
             uint32_t freq = ((byte0 & 0x0f) << 8) + byte1;
             int oct, semi, ft;
-            note->noteOffset = findNoteFromFreq(freq, semi, oct, ft);
+            note->noteOffset = findOffsetFromPeriod(freq, semi, oct, ft);
             
             //- store EFFECT_NUMBER as    byte2 AND 0Fh
             note->effect = byte2 & 0xf;
@@ -418,17 +368,30 @@ bool loadMod(void* mem, size_t size)
             note++;  
         }
     }
+    printf("\n");
+
+    int8_t* samples = (int8_t*)mem+size;
 
     // Load sample data.
-    uint8_t* sampleData = (uint8_t*)patterns;
-    for(int i = 0; i < 31; ++i)
+    //uint8_t* sampleData = (uint8_t*)patterns;
+    for(int i = 31; i >=1; --i)
     {
         Sample& s = gMod.samples[i];
         if( s.length > 0 )
         {
+            samples -= s.length;
+
             s.data = (int8_t*)malloc(s.length);
-            memcpy(s.data, sampleData, s.length);
-            sampleData += s.length;
+            memcpy(s.data, samples, s.length);
+/*
+            std::stringstream ss;
+            ss << "smp_" << i << ".raw";
+            if( FILE* fp = fopen(ss.str().c_str(), "wb"))
+            {
+                fwrite(s.data, s.length, 1, fp);
+                fclose(fp);
+            }
+            */
         }
     }
 
@@ -454,7 +417,6 @@ bool loadMod(const char* filename)
 
 int main(int argc, char** argv)
 {
-    testCircbuffer();
     if( argc <= 1 )
     {
         printf("please supply a mod filename.\n");
@@ -465,17 +427,6 @@ int main(int argc, char** argv)
         printf("failed to load mod file '%s'\n", argv[1]);
         return -1;
     }
-
-    //std::thread t(tickThread);
-    //t.detach();
-
-    timer_start([&]{gMod.tick();}, 1000/50);
-
-    std::thread r(producerThread);
-    r.detach();
-
-    //testCircbuffer();
-    //return 0;
 
     PaError err,result;
     int line;
@@ -492,8 +443,8 @@ int main(int argc, char** argv)
                                 2,          /* stereo output */
                                 paFloat32,  /* 32 bit floating point output */
                                 SAMPLE_RATE,
-                                //256,
-                                paFramesPerBufferUnspecified,        
+                                1024,
+                                //paFramesPerBufferUnspecified,        
                                                     /* frames per buffer, i.e. the number
                                                    of sample frames that PortAudio will
                                                    request from the callback. Many apps
@@ -502,21 +453,16 @@ int main(int argc, char** argv)
                                                    tells PortAudio to pick the best,
                                                    possibly changing, buffer size.*/
                                 patestCallback, /* this is your callback function */
-                                &gOutput )); /*This is a pointer that will be passed to
+                                &gMod )); /*This is a pointer that will be passed to
                                                    your callback*/
 
     ERR_WRAP(Pa_StartStream( stream ));
+    timer_start([&]{gMod.tick();}, 1000/50);
 
-   Pa_Sleep(NUM_SECONDS*100000);
+    Pa_Sleep(NUM_SECONDS*100000);
 
     ERR_WRAP(Pa_StopStream( stream ));
-
     ERR_WRAP(Pa_Terminate());
-    {
-        gWake = true;
-        gExit = true;
-        gWakeCv.notify_all();
-    }
     return 0;
 
 error:
@@ -601,7 +547,7 @@ const uint16_t gNotes[12*3*16] =
         ,204,192,181,171,161,152,144,136,128,121,114,108
     };
 
-uint16_t findNoteFromFreq(uint16_t amigaFreq, int& note, int& oct, int& ft, int tolerance)
+uint16_t findOffsetFromPeriod(uint16_t amigaFreq, int& note, int& oct, int& ft, int tolerance)
 {    
     for(oct=0; oct < 3; ++oct)
     {

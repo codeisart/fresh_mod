@@ -1,5 +1,3 @@
-#pragma once
-
 #include <assert.h>
 #include <thread>         // std::thread
 #include <condition_variable>
@@ -27,26 +25,22 @@ struct Sample
 struct Channel
 {
     float freq = 0.f;   // actual freq in hz to play sound.
-    float samplePos = 0; // float for now.
-    int freqOffset = 0; // offset in note table
+    float samplePos = -1; // float for now.
     int vol = 0;
     int ft = 0;
+    int periodoffset = 0;
     Sample* sample = nullptr;
-    Sample* lastSample = nullptr;
+    int sampleIndex = 5;
     Channel() {}
 
     // playback
-    void setSample(Sample* s) 
-    {
-        lastSample = s;
-    } 
-
-    void play(int offset=0) { samplePos = offset; }
+    void setSample(Sample* s);
     void setFineTune(int ftune) { ft = ftune; }
     void setVol(int v) { vol = v; }
-    void setFreq(int foffset) 
-    { 
-        freq = getFreqHz(foffset,ft);
+    void setPeriod(int poffset) 
+    {         
+        periodoffset = poffset;
+        freq = getFreqHz(poffset,ft);
     }
 
     static float getFreqHz(int foffset, int finetune)
@@ -62,7 +56,11 @@ struct Channel
     }
 
     // render thread.
-    int makeAudio(float* dst, float dstSize, float sampleRate );
+    int makeAudio(
+        std::vector<float>& leftMix,
+        std::vector<float>& rightMix,
+        int frameSize,
+        float sampleRate );
 };
 
 struct Note
@@ -95,5 +93,8 @@ struct Mod
     void updateRow(); 
     void updateEffects() {}
 
-    size_t makeAudio(RingBuffer<float>* stereoOutput, float sampleRate, int frameSize);
+    size_t makeAudio(
+        std::vector<float>& mixLeft,
+        std::vector<float>& mixRight,
+        float sampleRate, int frameSize);
 }; 
