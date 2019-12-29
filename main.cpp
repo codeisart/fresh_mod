@@ -9,193 +9,87 @@
 #include <chrono>
 #include <string>
 #include <vector>
+#include <functional>
 #include <map>
+#include "util.h"
+#include "mod.h"
 
-template<typename T> T Max(T a,T b) { return a > b ? a : b; }
-template<typename T> T Min(T a,T b) { return a < b ? a : b; }
-template<typename T> T Abs(T v) { return v < 0 ? -v : v; }
-template<typename T> T Clamp(T min, T max, T v) { return Min(Max(max,v),v); }
-
-#define ERR_WRAP(mac_err) do { result = mac_err ; line = __LINE__ ; if ( result != paNoError ) goto error; } while(0)
-#define NUM_SECONDS (60)
 
 static const char* notestr[] = {"C-", "C#", "D-", "D#","E-", "F-", "F#", "G-","G#","A-", "A#", "B-" };
 uint16_t findNoteFromFreq(uint16_t amigaFreq, int& note, int& oct, int& ft, int tolerance=1);
 extern const uint16_t gNotes[];
 #define SAMPLE_RATE (48000)
+#define NUM_SECONDS (60)
 
-static std::atomic<bool> gExit;
-static std::atomic<bool> gWake;
-static std::condition_variable gWakeCv;
-static std::mutex m;
 static const int kFrameSize = 700;// SAMPLE_RATE /20.f;
-
-template<typename T>
-struct RingBuffer
-{
-    int head, tail, size;
-    T* buff;
-    RingBuffer(RingBuffer&) = delete;
-    RingBuffer(RingBuffer&& rhs) : buff(rhs.buff), head(rhs.head), tail(rhs.tail), size(rhs.size) { rhs.buff = nullptr; }
-    RingBuffer(int InSize) : buff(new T[InSize]), head(0), tail(0), size(InSize) {}
-    ~RingBuffer() { delete[] buff; }
-    
-    int increment(int i) const { return (i+1)%size; }  
-    int decrement(int i) const { return (i-1+size)%size; }
-
-    bool push(const T& v) 
-    { 
-        int next = increment(head);
-        if( next == tail) return false; // overflow
-        buff[head] = v; 
-        head=next;
-        return true;
-    }  
-    bool pop(T& out) 
-    {
-         if(isEmpty()) return false;  // underflow
-         out = buff[tail]; 
-         tail=increment(tail); 
-         return true; 
-    }
-
-    int num() const { return head >= tail ? head-tail : (head+size)-tail; }
-    int space() const { return size-1 - num(); }
-    bool isEmpty() const { return head == tail; }
-    bool isFull() const { return increment(head) == tail; }
-};
-
+Mod gMod;
 RingBuffer<float> gOutput(kFrameSize*2*2); // stereo double buffered
+std::atomic<bool> gExit;
+std::atomic<bool> gWake;
+std::condition_variable gWakeCv;
+std::mutex m;
 
-struct Sample
+void timer_start(std::function<void(void)> func, unsigned int interval)
 {
-   std::string name;
-   size_t length = 0;
-   int fine_tune = 0;
-   int volume = 0;
-   int loop_start = 0;
-   int loop_length = 0; 
-   int8_t* data = nullptr;
-};
-
-struct Channel
-{
-    float freq = 0.f;   // actual freq in hz to play sound.
-    float samplePos = 0; // float for now.
-    int freqOffset = 0; // offset in note table
-    int vol = 0;
-    int ft = 0;
-    Sample* sample = nullptr;
-    Sample* lastSample = nullptr;
-    //RingBuffer<float> output;
-    //std::vector<float> output;
-
-    Channel() {}
-
-    // playback
-    void setSample(Sample* s) 
-    {
-        lastSample = s;
-    } 
-
-    void play(int offset=0) { samplePos = offset; }
-    void setFineTune(int ftune) { ft = ftune; }
-    void setVol(int v) { vol = v; }
-    void setFreq(int foffset) 
+  std::thread([func, interval]()
+  { 
+    while (true)
     { 
-        freq = getFreqHz(foffset,ft);
+      auto x = std::chrono::steady_clock::now() + std::chrono::milliseconds(interval);
+      func();
+      std::this_thread::sleep_until(x);
     }
+  }).detach();
+}
 
-    static float getFreqHz(int foffset, int finetune)
+
+// render thread.
+int Channel::makeAudio(float *dst, float dstSize, float sampleRate)
+{
+    if (lastSample)
+        sample = lastSample;
+    if (!sample)
+        return 0;
+    if (!sample->data)
+        return 0;
+    bool bLooping = sample->loop_length > 0;
+
+    float endPos = bLooping ? sample->loop_start + sample->loop_length : sample->length;
+    float freq = getFreqHz(freqOffset, ft);
+    if (freq <= 0.f)
+        freq = 16000;
+    float ratio = (float)freq / sampleRate;
+    static const float k8bitRecp = 1.f / 128.f;
+    static const float kVolRecp = 1.f / 64.f;
+
+    int i = 0;
+    for (; i < dstSize;
+         samplePos += ratio, dst++, i++)
     {
-        int ftoff = 0;//12*3*7;//finetune;
-        static uint32_t max = 12*3*16;
-        int offset = foffset + ftoff;
-        assert(offset < max);
-        assert(offset >= 0);
-        float amigaval = gNotes[offset];
-        assert(amigaval > 0);
-        return (float)7159090.5 / (amigaval * 2);
-    }
+        // src.
+        float val = (float)sample->data[(int)samplePos] * k8bitRecp;
+        float gain = (float)vol * kVolRecp;
+        *dst += val * gain;
 
-    // render thread.
-    int makeAudio(float* dst, float dstSize, float sampleRate )
-    {
-        if(lastSample) sample = lastSample;
-        if(!sample) return 0;
-        if(!sample->data) return 0;
-        bool bLooping = sample->loop_length > 0;
-        int i = 0;
-        //int shouldWrite = Min(output.spaframeSize);
-
-        float endPos = bLooping ? sample->loop_start + sample->loop_length : sample->length;
-        float freq = getFreqHz(freqOffset, ft);
-        if( freq <=0.f ) freq = 16000;
-        float ratio = (float)freq / sampleRate;
-
-        for (; i < dstSize; samplePos += ratio, dst++, i++)
+        if (samplePos >= endPos)
         {
-            if (samplePos >= endPos)
-            {
-                // restart loop?
-                if (bLooping)
-                    samplePos = sample->loop_start;
-                else
-                    return i;
-            }
-
-            // src.
-            float val = ((float)sample->data[(int)samplePos] / 128.f);
-            float gain = (float)vol / 64.f;
-            *dst += val * gain;
-            //if( !.push(val)) break;
-            //if( !output.push(val)) break;
+            // restart loop?
+            if (bLooping)
+                samplePos = sample->loop_start;
+            else
+                break;
         }
-        return i;
-    }    
-};
-
-struct Note
-{
-    uint16_t noteOffset:11;  // 0-??  = 11 bits = 0-2048 should be plenty for your needs.
-    uint8_t sampleNumber:5;  // 0-31  = 5 bits
-    uint8_t effect;    // 0-15  = 4 bits, but use 8 to keep things even
-    uint8_t eparm;     // 0-255 = 8 bits
-};
-
-struct Mod
-{
-    int nPatterns = 0;
-    int nChannels = 0;
-    int songLength = 0;
-    std::string name;
-    std::vector<Sample> samples;
-    std::vector<int> order;
-    std::vector<Channel> channels;
-    Note* patternData = nullptr;
-    std::mutex cs;
-
-    //playback
-    int speed = 6; // default
-    int currentOrder = 0; // index into order table.
-    int currentRow = 0;
-    int currentTick = 0;
-
-    void tick();
-    void updateRow(); 
-    void updateEffects() {}
-
-    size_t makeAudio(RingBuffer<float>* stereoOutput, float sampleRate, int frameSize);
-
-} gMod;
+    }
+    return i;
+}
 
 void Mod::tick()
 {
-    if( ++currentTick >= speed)
+    if (++currentTick >= speed)
     {
         updateRow();
         currentTick = 0;
-        currentRow++;
+        //currentRow++;
         if( currentRow>= 64)
         {
             currentRow = 0;
@@ -281,104 +175,6 @@ size_t Mod::makeAudio(RingBuffer<float>* stereoRingBuffer, float sampleRate, int
     return i;
 }
 
-void testCircbuffer()
-{
-    // test 1. write 
-    {
-        //CircBuff a(100 * sizeof(float));
-        RingBuffer<float> a(2);
-        assert(a.num() == 0);
-        a.push(0.12345f); 
-        assert(a.num() == 1);
-        float tmp;
-        assert(a.pop(tmp));
-        assert(tmp == 0.12345f);
-    }
-    // test 2. write a bunch.
-    {
-       RingBuffer<float> a(8);
-       for(int i = 0; i < 200; ++i)
-        {
-            assert(a.num() == 0);
-            a.push(0.12345f);
-            assert(a.num() == 1);
-            float tmp;
-            assert(a.pop(tmp));
-            assert(tmp == 0.12345f);
-        } 
-    }
-
-    // test 3. 
-    {
-        RingBuffer<float> a(128);
-        while(a.space()>0)
-        {
-            a.push(0.12345f); 
-        } 
-        while(a.num())
-        {
-            assert(a.num() > 0);
-            float tmp;
-            assert(a.pop(tmp));
-            assert(tmp == 0.12345f); 
-        }
-    }
-
-     // test 4. 
-    {
-        RingBuffer<float> a(128);
-        for( int i = 0; i < 64; ++i )
-        {
-            assert(a.num() == i);
-            a.push((float)i);    
-        }
-        for( int i=0; i < 64; ++i)
-        {
-            float tmp;
-            assert(a.num() == 64-i);
-            assert(a.pop(tmp));
-            assert(tmp == (float)i); 
-        }
-    }
-
-     // test 5. 
-    {
-        RingBuffer<float> a(128);
-        assert(a.space() == 127);
-        for( int i = 0; i < 128; ++i )
-        {
-            assert(a.num() == i);
-            a.push((float)i);    
-        }
-        assert(a.space()==0);
-        assert(a.isFull());
-        assert(!a.isEmpty());
-
-        for( int i=0; i < 128; ++i)
-        {
-            float tmp;
-            assert(a.pop(tmp) || i == 127);
-            assert(tmp == (float)i || i == 127); 
-        }
-    }
-}
-
-
-void tickThread()
-{
-    printf("Starting tick thread.\n");
-    while(!gExit)
-    {
-        auto start = std::chrono::system_clock::now();
-        auto end = start + std::chrono::milliseconds(20); // 50hz
-        while(std::chrono::system_clock::now() < end)
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(0));
-            //gMod.tick();
-        }
-        gMod.tick();
-    }
-}
 
 void producerThread()
 {
@@ -396,7 +192,7 @@ void producerThread()
         auto loopStart = std::chrono::system_clock::now();
         {
             std::unique_lock<std::mutex> lk(m);
-            if( !gWakeCv.wait_until(lk,loopStart + std::chrono::milliseconds(10), []() -> bool { return gWake; } ) )
+            //if( !gWakeCv.wait_until(lk,loopStart + std::chrono::milliseconds(0), []() -> bool { return gWake; } ) )
             {
                 //printf("Wait timeout...\n");
             }
@@ -416,12 +212,12 @@ void producerThread()
         gWake = false;
 
         // Tick if we need to.
-        auto tickDelta =std::chrono::system_clock::now() - lastTickTime;
-        if( tickDelta > std::chrono::milliseconds(20) )
-        {
-            lastTickTime = std::chrono::system_clock::now();
-            gMod.tick();    
-        }
+        //auto tickDelta =std::chrono::system_clock::now() - lastTickTime;
+        //if( tickDelta > std::chrono::milliseconds(20) )
+        //{
+        //    lastTickTime = std::chrono::system_clock::now();
+        //    gMod.tick();    
+        //}
     }
 
     printf("Exiting worker thread.\n");
@@ -672,6 +468,8 @@ int main(int argc, char** argv)
 
     //std::thread t(tickThread);
     //t.detach();
+
+    timer_start([&]{gMod.tick();}, 1000/50);
 
     std::thread r(producerThread);
     r.detach();
