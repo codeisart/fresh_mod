@@ -33,7 +33,7 @@ struct Channel
     Sample* sample = nullptr;
     int volRamp = 0;
     int volRampTicksLeft = 0;
-    int portaSpeed = 0;
+    int portaSpeed = 0, prevPortaSpeed = 0;
     int portaToNoteOffset = 0;
     Channel() {}
 
@@ -48,12 +48,12 @@ struct Channel
         offsetInNoteTable--; // subtract 1 as 0 is an error. 
         int finetuneoffset = 12*3 * finetune; // can be negative.
         // clamp fine tune in range.
-        for( ; offsetInNoteTable+finetuneoffset < 0 || offsetInNoteTable+finetuneoffset > 12*3*16
-             ; finetuneoffset = 12*3 * finetune )
-        {
-            if( finetune > 0) finetune--;
-            else if (finetune < 0) finetune++;
-        }
+        //for( ; offsetInNoteTable+finetuneoffset < 0 || offsetInNoteTable+finetuneoffset > 12*3*16
+        //     ; finetuneoffset = 12*3 * finetune )
+        //{
+        //    if( finetune > 0) finetune--;
+        //    else if (finetune < 0) finetune++;
+        //}
         return gNotes[offsetInNoteTable + finetuneoffset];
     }
 

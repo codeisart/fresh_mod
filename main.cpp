@@ -185,7 +185,7 @@ void Mod::updateRow()
         Note& note = patternData[(64*nChannels*patternIdx)+(nChannels*currentRow)+channelIdx];
         Channel& channel = channels[channelIdx];
 
-        prettyPrintNote(&note, channelIdx, nChannels, currentRow);
+        //prettyPrintNote(&note, channelIdx, nChannels, currentRow);
         if( note.sampleNumber )
         {
             Sample* smpl = &samples[note.sampleNumber];
@@ -208,44 +208,60 @@ void Mod::updateRow()
                 }
            }
         }
-        // skip effects.
-        //if( note.effect !=0 && note.eparm != 0)
+        if( note.effect == 0 && note.eparm == 0)
+            int nop = 0;
+        else if (note.effect == 0xf)
+            speed = note.eparm;
+        else if (note.effect == 0xc) // set volume
+            channel.setVol(note.eparm);
+        else if (note.effect == 0xd) // pattern break.
         {
-            // set speed.
-            if( note.effect == 0xf )
-                speed = note.eparm;
-            else if( note.effect == 0xc ) // set volume
-                channel.setVol( note.eparm);
-            else if( note.effect == 0xd ) // pattern break.
-            {
-                if( note.eparm > 64 )currentRow = 0;
-                else currentRow = note.eparm;
-                currentOrder++;
-                currentRow--; // We are about to increment this, so make it -1 that we want it.
-            }
-            else if( note.effect == 0xe && (note.eparm >> 4) == 0x8 ) // panning
-            {
-                int pan = note.eparm & 0xf;
-                pan-=8;
-                channel.pan = pan*8;
-            }
-            else if( note.effect == 0x9) // sample offset.
-                channel.samplePos = (note.eparm * 0x100);
-            else if( note.effect == 0xa )
-            {
-                int8_t lowNib = -(note.eparm & 0xf);
-                int8_t hiNib  = (note.eparm>>4) & 0xf;
-                channel.volRamp = lowNib ? lowNib : hiNib;
-                channel.volRampTicksLeft = speed-1;
-            }
-            else if( note.effect == 0x3 )
-            {
-                // new target?
-                if( note.noteOffset )
-                    channel.portaToNoteOffset  = note.noteOffset;
-                if( note.eparm )
-                    channel.portaSpeed = note.eparm;
-            }
+            if (note.eparm > 64)
+                currentRow = 0;
+            else
+                currentRow = note.eparm;
+            currentOrder++;
+            currentRow--; // We are about to increment this, so make it -1 that we want it.
+        }
+        else if (note.effect == 0xe && (note.eparm >> 4) == 0x8) // panning
+        {
+            int pan = note.eparm & 0xf;
+            pan -= 8;
+            channel.pan = pan * 8;
+        }
+        else if (note.effect == 0x9) // sample offset.
+            channel.samplePos = (note.eparm * 0x100);
+        else if (note.effect == 0xa)
+        {
+            int8_t lowNib = -(note.eparm & 0xf);
+            int8_t hiNib = (note.eparm >> 4) & 0xf;
+            channel.volRamp = lowNib ? lowNib : hiNib;
+            channel.volRampTicksLeft = speed - 1;
+        }
+        else if (note.effect == 0x3) // porta to note.
+        {
+            // new target?
+            if (note.noteOffset)
+                channel.portaToNoteOffset = note.noteOffset;
+            if (note.eparm)
+                channel.portaSpeed = note.eparm;
+        }
+        else if(note.effect == 0x5) // porta to note and volume slide combo.
+        {
+            int8_t lowNib = -(note.eparm & 0xf);
+            int8_t hiNib = (note.eparm >> 4) & 0xf;
+            channel.volRamp = lowNib ? lowNib : hiNib;
+            channel.volRampTicksLeft = speed - 1;
+            // new target?
+            if (note.noteOffset)
+                channel.portaToNoteOffset = note.noteOffset;
+            if (channel.portaSpeed == 0 && channel.prevPortaSpeed)
+                channel.portaSpeed = channel.prevPortaSpeed;
+        }
+        else
+        {
+            printf("effect unhandled %x%02x, row=%d, channel=%d\n", 
+                note.effect, note.eparm, currentRow, channelIdx);
         }
     }
 }
@@ -272,7 +288,11 @@ void Mod::updateEffects()
             else if( targetFreqAmiga < c.amigaPeriod )
                 c.amigaPeriod = Max<int>(c.amigaPeriod - c.portaSpeed, targetFreqAmiga);
             else 
+            {
+                // we are finished moving, so stop and stash our speed incase we are retriggered.
+                c.prevPortaSpeed = c.portaSpeed;
                 c.portaSpeed = 0; // we are done.
+            }
 
             // update date the freq.
             c.freq = Channel::amigaPeriodToHz(c.amigaPeriod);
