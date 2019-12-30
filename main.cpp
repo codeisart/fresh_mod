@@ -16,13 +16,59 @@
 #include "mod.h"
 
 static const char* notestr[] = {"C-", "C#", "D-", "D#","E-", "F-", "F#", "G-","G#","A-", "A#", "B-" };
-uint16_t findOffsetFromPeriod(uint16_t amigaFreq, int& note, int& oct, int& ft, int tolerance=1);
 extern const uint16_t gNotes[];
 #define SAMPLE_RATE (48000)
 #define NUM_SECONDS (60)
 
 static const int kFrameSize = 700;// SAMPLE_RATE /20.f;
 Mod gMod;
+
+uint16_t findOffsetFromPeriod(int amigaFreq)
+{    
+    if( amigaFreq <= 0) return 0;
+    const uint16_t* normal = gNotes+(12*3*8); // offset to normal range.
+    for(int i = 0; i < 12*3; ++i)
+    {
+        if(amigaFreq >= normal[i])
+            return i+1+(12*3*8);
+    }
+    return 0;
+}
+
+void offsetToFancyNote(int offset, int& semi, int& oct, int& ft)
+{
+    offset--; 
+    ft = offset / (12*3);
+    semi = offset % 12;
+    oct = (offset - semi - (36*ft)) / 12;
+    ft -=8;
+    oct+=3;
+}
+void prettyPrintNote(Note* note, int channel, int nChannels, int row)
+{
+    // pretty print.
+    int semi, oct, ft;
+    offsetToFancyNote(note->noteOffset, semi, oct, ft);
+
+    if (channel == 0)
+    {
+        printf("\n");
+        printf("%02x    ", row);
+    }
+    // note.
+    if (note->noteOffset != 0)
+        printf("%s%d %02d ", notestr[semi], oct, ft);
+    else
+        printf("...... ");
+    // sample #
+    if (note->sampleNumber)
+        printf("%02x ", note->sampleNumber);
+    else
+        printf(".. ");
+    // effect.
+    printf("%x%02x", note->effect, note->eparm);
+    printf("     ");
+}
 
 void timer_start(std::function<void(void)> func, unsigned int interval)
 {
@@ -41,6 +87,7 @@ void Channel::setSample(Sample* s)
 {
     sample = s;
     samplePos = 0;
+    ft = sample->fine_tune;
 }
 
 // render thread.
@@ -66,6 +113,12 @@ int Channel::makeAudio(
     float* left = leftMix.data();
     float* right = rightMix.data();
     static const float s8ToFloatRecp = 1.f / 127.f;
+    static const float vol64FloatRecp = 1.f / 64.f;
+    float fltvol = (float)vol * vol64FloatRecp;
+
+    // too sleepy, think about this properly.
+    float fltLeftPan  = Abs(Min(0, pan)) * vol64FloatRecp;
+    float fltRightPan = Max(0, pan) * vol64FloatRecp; 
 
     int i = 0; 
     while( i < frameSize )
@@ -85,6 +138,7 @@ int Channel::makeAudio(
 
         float s = (float) sample->data[(int)samplePos];
         s*= s8ToFloatRecp;
+        s*= fltvol;
         (*left++) += s;
         (*right++) += s;
         
@@ -107,12 +161,16 @@ void Mod::tick()
         {
             currentRow = 0;
             currentOrder++;
+            if( currentOrder >= songLength )
+            {
+                currentOrder = 0;
+            }
         }
-        else
-        {
-            updateEffects();
-        }        
-    }    
+    }
+    else
+    {
+        updateEffects();
+    }
 }
 
 void Mod::updateRow() 
@@ -120,11 +178,14 @@ void Mod::updateRow()
     //std::unique_lock<std::mutex> lk(cs);
 
     int patternIdx = order[currentOrder];
-    printf("updaterow... ptn=%d, ord=%d, row=%d\n", patternIdx, currentOrder, currentRow );
+    //printf("updaterow... ptn=%d, ord=%d, row=%d\n", patternIdx, currentOrder, currentRow );
     for(int channelIdx = 0; channelIdx < nChannels; ++channelIdx)
+    //int channelIdx = 2;
     {        
         Note& note = patternData[(64*nChannels*patternIdx)+(nChannels*currentRow)+channelIdx];
         Channel& channel = channels[channelIdx];
+
+        prettyPrintNote(&note, channelIdx, nChannels, currentRow);
         if( note.sampleNumber )
         {
             Sample* smpl = &samples[note.sampleNumber];
@@ -132,31 +193,94 @@ void Mod::updateRow()
             channel.setVol(smpl->volume);
             //printf( "chn %d, set sample %d '%s'\n", channelIdx, note.sampleNumber, smpl->name.c_str());  
         }
-        if( note.noteOffset >=0 ) //=0 is fail.. hmm...
+        if( note.noteOffset != 0 ) 
         {
            if (note.effect != 3 && note.effect != 5) 
            {
-                //if( channel.lastSample )
-                //    channel.ft = channel.lastSample->fine_tune;
-
-               // channel.freqOffset = note.noteOffset + (12*3*channel.ft);
+                if( channel.sample)
+                    channel.ft = channel.sample->fine_tune;
+                
+                int period = Channel::getAmigaFreq(note.noteOffset, channel.ft);
+                if( period > 0 )
+                {
+                    channel.amigaPeriod = period;
+                    channel.freq = Channel::amigaPeriodToHz(period);
+                }
            }
         }
-
         // skip effects.
-        if( note.effect !=0 && note.eparm != 0)
+        //if( note.effect !=0 && note.eparm != 0)
         {
-            // tick sfx.
-        }
-
-        if( note.noteOffset )
-        {
-            channel.setPeriod(note.noteOffset);
+            // set speed.
+            if( note.effect == 0xf )
+                speed = note.eparm;
+            else if( note.effect == 0xc ) // set volume
+                channel.setVol( note.eparm);
+            else if( note.effect == 0xd ) // pattern break.
+            {
+                if( note.eparm > 64 )currentRow = 0;
+                else currentRow = note.eparm;
+                currentOrder++;
+                currentRow--; // We are about to increment this, so make it -1 that we want it.
+            }
+            else if( note.effect == 0xe && (note.eparm >> 4) == 0x8 ) // panning
+            {
+                int pan = note.eparm & 0xf;
+                pan-=8;
+                channel.pan = pan*8;
+            }
+            else if( note.effect == 0x9) // sample offset.
+                channel.samplePos = (note.eparm * 0x100);
+            else if( note.effect == 0xa )
+            {
+                int8_t lowNib = -(note.eparm & 0xf);
+                int8_t hiNib  = (note.eparm>>4) & 0xf;
+                channel.volRamp = lowNib ? lowNib : hiNib;
+                channel.volRampTicksLeft = speed-1;
+            }
+            else if( note.effect == 0x3 )
+            {
+                // new target?
+                if( note.noteOffset )
+                    channel.portaToNoteOffset  = note.noteOffset;
+                if( note.eparm )
+                    channel.portaSpeed = note.eparm;
+            }
         }
     }
 }
 
-size_t Mod::makeAudio(
+void Mod::updateEffects()
+{
+    int patternIdx = order[currentOrder];
+    for(int channelIdx = 0; channelIdx < nChannels; ++channelIdx)
+    {
+        Channel& c = channels[channelIdx];
+        Note& note = patternData[(64*nChannels*patternIdx)+(nChannels*currentRow)+channelIdx];
+
+        if( c.volRampTicksLeft >0 )
+        {
+            c.vol = Clamp(0, 64, c.vol+c.volRamp);
+            c.volRampTicksLeft--;
+        }
+        if(c.portaSpeed > 0)  
+        {
+            // going up or down?
+            uint16_t targetFreqAmiga = Channel::getAmigaFreq(c.portaToNoteOffset, c.ft);
+            if( targetFreqAmiga > c.amigaPeriod ) 
+                c.amigaPeriod = Min<int>(c.amigaPeriod + c.portaSpeed, targetFreqAmiga );
+            else if( targetFreqAmiga < c.amigaPeriod )
+                c.amigaPeriod = Max<int>(c.amigaPeriod - c.portaSpeed, targetFreqAmiga);
+            else 
+                c.portaSpeed = 0; // we are done.
+
+            // update date the freq.
+            c.freq = Channel::amigaPeriodToHz(c.amigaPeriod);
+        }
+    }
+}
+
+ size_t Mod::makeAudio(
     std::vector<float>& leftMix,
     std::vector<float>& rightMix,
     float sampleRate, 
@@ -164,7 +288,6 @@ size_t Mod::makeAudio(
 {
     std::unique_lock<std::mutex> lk(cs);
     int o,f,n;
-    int foff=findOffsetFromPeriod(214, o,f,n); // c-5
     int made = 0;
     for(int i = 0; i < nChannels; ++i)
     {
@@ -185,12 +308,6 @@ size_t Mod::makeAudio(
     return made;
 }
 
-/* This routine will be called by the PortAudio engine when audio is needed.
-   It may called at interrupt level on some machines so don't do anything
-   that could mess up the system like calling malloc() or free().
-*/ 
-
-
 static int patestCallback( const void *inputBuffer, void *outputBuffer,
                            unsigned long framesPerBuffer,
                            const PaStreamCallbackTimeInfo* timeInfo,
@@ -200,8 +317,6 @@ static int patestCallback( const void *inputBuffer, void *outputBuffer,
     /* Cast data passed through stream to our structure. */
     float *out = (float*)outputBuffer;
     (void) inputBuffer; /* Prevent unused variable warning. */
-
-    //gMod.tick();
 
     std::vector<float> leftMix;
     std::vector<float> rightMix;
@@ -233,7 +348,6 @@ int getChannelCount(const void* mem, size_t size)
     return 0;
 }
 
-
 bool loadMod(void* mem, size_t size)
 {
     // channels.
@@ -250,7 +364,7 @@ bool loadMod(void* mem, size_t size)
     printf("loading '%d' channel mod '%s'\n", nChannels, name);
 
     // sample info.
-    uint8_t* sampleInfoState = (uint8_t*)mem+20; 
+    uint8_t* readPtr8 = (uint8_t*)mem+20; 
     gMod.samples.resize(32);
     for(int i = 1; i <= 31; ++i)
     {
@@ -258,37 +372,37 @@ bool loadMod(void* mem, size_t size)
 
         // name
         char name[23] = {0};
-        memcpy(name, sampleInfoState, 22);
+        memcpy(name, readPtr8, 22);
         s.name = name;
-        sampleInfoState += 22;
+        readPtr8 += 22;
 
         // length.
-        uint16_t packed = *(uint16_t*)sampleInfoState;        
+        uint16_t packed = *(uint16_t*)readPtr8;        
         s.length = (((packed & 0xff) * 0x100) + (packed>>8)) * 2;
-        sampleInfoState+=2;
+        readPtr8+=2;
 
         // fine tune.
-        s.fine_tune = *(uint8_t*)sampleInfoState;
+        s.fine_tune = *(uint8_t*)readPtr8;
         if(s.fine_tune > 7) s.fine_tune -= 16;
-        sampleInfoState+=1;
+        readPtr8+=1;
 
         // volume.
-        s.volume = *(uint8_t*)sampleInfoState;
-        sampleInfoState+=1; 
+        s.volume = *(uint8_t*)readPtr8;
+        readPtr8+=1; 
 
         // loop start.
-        packed = *(uint16_t*)sampleInfoState;   
+        packed = *(uint16_t*)readPtr8;   
         s.loop_start = (((packed & 0xff) * 0x100) + (packed>>8)) * 2;
-        sampleInfoState+=2;
+        readPtr8+=2;
 
         // loop length
-        packed = *(uint16_t*)sampleInfoState; 
+        packed = *(uint16_t*)readPtr8; 
         uint8_t byte1 = (packed >> 0) & 0xff;
         uint8_t byte2 = (packed >> 8) & 0xff;
         s.loop_length = ((int)(byte1*0x100) + byte2);
         if( s.loop_length == 1) s.loop_length = 0; // 1 means non-looping.
         else s.loop_length *= 2;
-        sampleInfoState+=2; 
+        readPtr8+=2; 
         
         if( s.length )
         {
@@ -299,72 +413,53 @@ bool loadMod(void* mem, size_t size)
     }
 
     // song length
-    gMod.songLength = *(uint8_t*)sampleInfoState;
-    sampleInfoState+=1;
+    gMod.songLength = *(uint8_t*)readPtr8;
+    readPtr8+=1;
     
     // Skip unused.
-    sampleInfoState+=1;
-
+    readPtr8+=1;
+    
     // Order table.
+    gMod.order.resize(gMod.songLength);
     for(int i = 0; i < 128; ++i)
     {
-       uint8_t order = *(uint8_t*)sampleInfoState;
+       uint8_t order = *(uint8_t*)readPtr8;
        if( order > gMod.nPatterns) gMod.nPatterns = order;
-       gMod.order.push_back(order);
-       sampleInfoState++;
-       printf("order=%d -> %u\n", i, order);
+       readPtr8++;
+       if( i < gMod.songLength )
+       {
+           gMod.order[i] = order;
+           printf("%02x, ",order);
+       }
     }
-    printf("nPatterns=%d\n", gMod.nPatterns);
-    assert((uintptr_t)sampleInfoState - (uintptr_t)mem == 1080);
+    printf("\nLength=%02x, nPatterns=%02x\n", gMod.songLength, gMod.nPatterns);
+    assert((uintptr_t)readPtr8 - (uintptr_t)mem == 1080);
 
     //- read 4 bytes, discard them (we are at position 1080 again, this is M.K. etc!)
-    sampleInfoState+=4;
+    readPtr8+=4;
 
     size_t patternDataSize = 64 * gMod.nChannels * sizeof(Note) * (gMod.nPatterns+1);
     gMod.patternData = (Note*)malloc(patternDataSize);
 
-    uint32_t* patterns = (uint32_t*)sampleInfoState;
     for(int i = 0; i< gMod.nPatterns; ++i)
     {
         Note* note = &gMod.patternData[(gMod.nChannels * 64 * i)];
+        printf("\npattern=%02x", i);
         for(int j = 0; j < gMod.nChannels * 64; j++)
         {
-            uint32_t packed = *patterns++;
+            uint16_t byte0 = *readPtr8++;
+            uint16_t byte1 = *readPtr8++;
+            uint16_t byte2 = *readPtr8++;
+            uint16_t byte3 = *readPtr8++;
 
-            uint8_t byte0 = packed & 0xff;
-            uint8_t byte1 = (packed >> 8)  & 0xff;
-            uint8_t byte2 = (packed >> 16) & 0xff;
-            uint8_t byte3 = (packed >> 24) & 0xff;
+            // period to note
+            int period = ((byte0 & 0x0F) << 8) | byte1;
+            note->noteOffset = findOffsetFromPeriod(period);  
+            note->sampleNumber = (byte0 & 0xF0) | (byte2 >> 4);
+            note->effect = byte2 & 0x0F;
+            note->eparm = byte3;
 
-            //store SAMPLE_NUMBER as    (byte0 AND 0F0h) + (byte2 SHR 4)
-            note->sampleNumber = (byte0 & 0xf0) + (byte2 >> 4);
-
-            //- store PERIOD_FREQUENCY as ((byte0 AND 0Fh) SHL 8) + byte1;
-            uint32_t freq = ((byte0 & 0x0f) << 8) + byte1;
-            int oct, semi, ft;
-            note->noteOffset = findOffsetFromPeriod(freq, semi, oct, ft);
-            
-            //- store EFFECT_NUMBER as    byte2 AND 0Fh
-            note->effect = byte2 & 0xf;
-
-            //- store EFFECT_PARAMETER as byte 3
-            note->eparm =  byte3;
-
-            if( j % gMod.nChannels == 0 )
-            {
-                printf("\n");
-                printf("%02x    ", j / 4);
-            }
-            // note.
-            if( note->noteOffset) printf("%s%d %d ", notestr[semi],oct,ft);
-            else printf("..... ");
-            // sample #
-            if( note->sampleNumber ) printf("%02x ", note->sampleNumber);
-            else printf(".. ");
-            // effect.
-            printf("%x%02x", note->effect, note->eparm);
-            printf("     ");
-
+            prettyPrintNote(note, j % nChannels, nChannels, j / nChannels );
             note++;  
         }
     }
@@ -373,7 +468,6 @@ bool loadMod(void* mem, size_t size)
     int8_t* samples = (int8_t*)mem+size;
 
     // Load sample data.
-    //uint8_t* sampleData = (uint8_t*)patterns;
     for(int i = 31; i >=1; --i)
     {
         Sample& s = gMod.samples[i];
@@ -443,8 +537,8 @@ int main(int argc, char** argv)
                                 2,          /* stereo output */
                                 paFloat32,  /* 32 bit floating point output */
                                 SAMPLE_RATE,
-                                1024,
-                                //paFramesPerBufferUnspecified,        
+                                //1024,
+                                paFramesPerBufferUnspecified,        
                                                     /* frames per buffer, i.e. the number
                                                    of sample frames that PortAudio will
                                                    request from the callback. Many apps
@@ -457,7 +551,7 @@ int main(int argc, char** argv)
                                                    your callback*/
 
     ERR_WRAP(Pa_StartStream( stream ));
-    timer_start([&]{gMod.tick();}, 1000/50);
+    timer_start([&]{gMod.tick();}, 18);
 
     Pa_Sleep(NUM_SECONDS*100000);
 
@@ -546,26 +640,3 @@ const uint16_t gNotes[12*3*16] =
         ,407,384,363,342,323,305,288,272,256,242,228,216
         ,204,192,181,171,161,152,144,136,128,121,114,108
     };
-
-uint16_t findOffsetFromPeriod(uint16_t amigaFreq, int& note, int& oct, int& ft, int tolerance)
-{    
-    for(oct=0; oct < 3; ++oct)
-    {
-        for(note=0; note < 12; note++ )
-        {
-            for(ft=0; ft < 16; ft++)
-            {
-                uint16_t off = (12*3*ft)+(12*oct)+note;
-                uint16_t val = gNotes[off];
-                int diff = (int)amigaFreq-val;
-                if( Abs(diff) <= tolerance)
-                {
-                    oct+=3;
-                    ft -=8;
-                    return off;
-                }
-            }
-        }
-    }
-    return 0; // fail.
-}

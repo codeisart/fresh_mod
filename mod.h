@@ -28,33 +28,39 @@ struct Channel
     float samplePos = -1; // float for now.
     int vol = 0;
     int ft = 0;
-    int periodoffset = 0;
+    int pan = 0;
+    int amigaPeriod = 0;
     Sample* sample = nullptr;
-    int sampleIndex = 5;
+    int volRamp = 0;
+    int volRampTicksLeft = 0;
+    int portaSpeed = 0;
+    int portaToNoteOffset = 0;
     Channel() {}
+
+    static float amigaPeriodToHz(int amigaFreq)
+    {
+        assert(amigaFreq > 0);
+        return (float)7159090.5f / (amigaFreq * 2);
+    }
+    static int getAmigaFreq(uint16_t offsetInNoteTable, int finetune = 0)
+    {
+        if( offsetInNoteTable != 0 && offsetInNoteTable >= 12*3*16) return -1;
+        offsetInNoteTable--; // subtract 1 as 0 is an error. 
+        int finetuneoffset = 12*3 * finetune; // can be negative.
+        // clamp fine tune in range.
+        for( ; offsetInNoteTable+finetuneoffset < 0 || offsetInNoteTable+finetuneoffset > 12*3*16
+             ; finetuneoffset = 12*3 * finetune )
+        {
+            if( finetune > 0) finetune--;
+            else if (finetune < 0) finetune++;
+        }
+        return gNotes[offsetInNoteTable + finetuneoffset];
+    }
 
     // playback
     void setSample(Sample* s);
     void setFineTune(int ftune) { ft = ftune; }
     void setVol(int v) { vol = v; }
-    void setPeriod(int poffset) 
-    {         
-        periodoffset = poffset;
-        freq = getFreqHz(poffset,ft);
-    }
-
-    static float getFreqHz(int foffset, int finetune)
-    {
-        int ftoff = 0;//12*3*7;//finetune;
-        static uint32_t max = 12*3*16;
-        int offset = foffset + ftoff;
-        assert(offset < max);
-        assert(offset >= 0);
-        float amigaval = gNotes[offset];
-        assert(amigaval > 0);
-        return (float)7159090.5 / (amigaval * 2);
-    }
-
     // render thread.
     int makeAudio(
         std::vector<float>& leftMix,
@@ -91,7 +97,7 @@ struct Mod
 
     void tick();
     void updateRow(); 
-    void updateEffects() {}
+    void updateEffects();
 
     size_t makeAudio(
         std::vector<float>& mixLeft,
