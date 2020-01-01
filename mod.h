@@ -31,10 +31,24 @@ struct Channel
     int pan = 0;
     int amigaPeriod = 0;
     Sample* sample = nullptr;
-    int volRamp = 0;
-    int volRampTicksLeft = 0;
-    int portaSpeed = 0, prevPortaSpeed = 0;
+    
+    // volume slide
+    int volSlideSpeed = 0;
+    int volSlideTicksLeft = 0;
+    
+    // portamento.
+    int portaSpeed = 0;
     int portaToNoteOffset = 0;
+    int portaAmmount = 0;
+    int portaTicksLeft = 0;
+    
+    // vibrato 
+    int vibrPos = 0;
+    int vibrSpeed = 0;
+    bool vibrInv = false;
+    int vibrDepth = 0;
+    int vibrTicksLeft = 0;
+
     Channel() {}
 
     static float amigaPeriodToHz(int amigaFreq)
@@ -61,6 +75,7 @@ struct Channel
     void setSample(Sample* s);
     void setFineTune(int ftune) { ft = ftune; }
     void setVol(int v) { vol = v; }
+
     // render thread.
     int makeAudio(
         std::vector<float>& leftMix,
@@ -90,7 +105,7 @@ struct Mod
     std::mutex cs;
 
     //playback
-    int speed = 6; // default
+    int currentSpeed = 6; // default
     int currentOrder = 0; // index into order table.
     int currentRow = 0;
     int currentTick = 0;
@@ -98,6 +113,10 @@ struct Mod
     void tick();
     void updateRow(); 
     void updateEffects();
+
+    void startVolSlide(Channel& channel, Note& note);
+    void startVibrato(Channel& channel, Note& note, bool bKeepOld);
+    void startPortamento(Channel& channel, Note& note, bool bTargetNote, bool bKeepOld );
 
     size_t makeAudio(
         std::vector<float>& mixLeft,

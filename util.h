@@ -4,7 +4,7 @@
 template<typename T> T Max(T a,T b) { return a > b ? a : b; }
 template<typename T> T Min(T a,T b) { return a < b ? a : b; }
 template<typename T> T Abs(T v) { return v < 0 ? -v : v; }
-template<typename T> T Clamp(T min, T max, T v) { return Min(Max(max,v),v); }
+template<typename T> T Clamp(T min, T max, T v) { return v < min ? min : v > max ? max : v; }
 
 #define ERR_WRAP(mac_err) do { result = mac_err ; line = __LINE__ ; if ( result != paNoError ) goto error; } while(0)
 

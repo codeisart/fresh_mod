@@ -17,11 +17,15 @@
 
 static const char* notestr[] = {"C-", "C#", "D-", "D#","E-", "F-", "F#", "G-","G#","A-", "A#", "B-" };
 extern const uint16_t gNotes[];
+extern const uint8_t sine_table[32];
+Mod gMod;
+
+// solo for debugging.
+int devSoloChannel = -1;
+int devSoloPattern = -1;
+
 #define SAMPLE_RATE (48000)
 #define NUM_SECONDS (60)
-
-static const int kFrameSize = 700;// SAMPLE_RATE /20.f;
-Mod gMod;
 
 uint16_t findOffsetFromPeriod(int amigaFreq)
 {    
@@ -151,7 +155,7 @@ int Channel::makeAudio(
 void Mod::tick()
 {
     currentTick++;
-    if (currentTick >= speed)
+    if (currentTick >= currentSpeed)
     {
         std::unique_lock<std::mutex> lk(cs);
         updateRow();
@@ -173,14 +177,54 @@ void Mod::tick()
     }
 }
 
+void Mod::startVibrato(Channel& channel, Note& note, bool bKeepOld)
+{
+    if( !bKeepOld )
+    {
+        int depth = note.eparm & 0xf;
+        int speed = (note.eparm >> 4) & 0xf;
+        if( depth ) channel.vibrDepth = depth;
+        if( speed ) channel.vibrSpeed = speed;
+    }
+    channel.vibrTicksLeft = currentSpeed - 1;
+}
+void Mod::startVolSlide(Channel& channel, Note& note)
+{
+    // vol slide.
+    int8_t lowNib = -(note.eparm & 0xf);
+    int8_t hiNib = (note.eparm >> 4) & 0xf;
+    int speed =  lowNib ? lowNib : hiNib;
+    if( speed ) channel.volSlideSpeed = speed;
+    channel.volSlideTicksLeft = currentSpeed - 1;
+}
+void Mod::startPortamento(Channel& channel, Note& note, bool bTargetNote, bool bKeepOld )
+{
+    if( bTargetNote )
+    {
+        // new target?
+        if (note.noteOffset)
+            channel.portaToNoteOffset = note.noteOffset;
+    }else
+    {
+        channel.portaToNoteOffset = 0;
+    }
+    
+    if( !bKeepOld )
+    {
+        if (note.eparm)
+            channel.portaSpeed = note.effect == 0x2 ? -note.eparm : note.eparm;
+    }
+    channel.portaTicksLeft = currentSpeed - 1;
+}
+
 void Mod::updateRow() 
 {
-    //std::unique_lock<std::mutex> lk(cs);
+    int patternIdx = devSoloPattern >= 0 ? 
+        devSoloPattern : 
+        order[currentOrder];
 
-    int patternIdx = order[currentOrder];
     //printf("updaterow... ptn=%d, ord=%d, row=%d\n", patternIdx, currentOrder, currentRow );
     for(int channelIdx = 0; channelIdx < nChannels; ++channelIdx)
-    //int channelIdx = 2;
     {        
         Note& note = patternData[(64*nChannels*patternIdx)+(nChannels*currentRow)+channelIdx];
         Channel& channel = channels[channelIdx];
@@ -193,6 +237,7 @@ void Mod::updateRow()
             channel.setVol(smpl->volume);
             //printf( "chn %d, set sample %d '%s'\n", channelIdx, note.sampleNumber, smpl->name.c_str());  
         }
+
         if( note.noteOffset != 0 ) 
         {
            if (note.effect != 3 && note.effect != 5) 
@@ -205,13 +250,19 @@ void Mod::updateRow()
                 {
                     channel.amigaPeriod = period;
                     channel.freq = Channel::amigaPeriodToHz(period);
+
+                    // these all reset when a new note is played.
+                    channel.vibrInv = false;
+                    channel.vibrPos = 0;
                 }
            }
         }
+
+        // fx
         if( note.effect == 0 && note.eparm == 0)
             int nop = 0;
-        else if (note.effect == 0xf)
-            speed = note.eparm;
+        else if (note.effect == 0xf) // set speed
+            currentSpeed = note.eparm;
         else if (note.effect == 0xc) // set volume
             channel.setVol(note.eparm);
         else if (note.effect == 0xd) // pattern break.
@@ -231,72 +282,116 @@ void Mod::updateRow()
         }
         else if (note.effect == 0x9) // sample offset.
             channel.samplePos = (note.eparm * 0x100);
-        else if (note.effect == 0xa)
+        else if (note.effect == 0xa) // volume slide
         {
-            int8_t lowNib = -(note.eparm & 0xf);
-            int8_t hiNib = (note.eparm >> 4) & 0xf;
-            channel.volRamp = lowNib ? lowNib : hiNib;
-            channel.volRampTicksLeft = speed - 1;
+            startVolSlide(channel, note);
         }
         else if (note.effect == 0x3) // porta to note.
         {
-            // new target?
-            if (note.noteOffset)
-                channel.portaToNoteOffset = note.noteOffset;
-            if (note.eparm)
-                channel.portaSpeed = note.eparm;
+            startPortamento(channel, note, true, false);
         }
         else if(note.effect == 0x5) // porta to note and volume slide combo.
         {
-            int8_t lowNib = -(note.eparm & 0xf);
-            int8_t hiNib = (note.eparm >> 4) & 0xf;
-            channel.volRamp = lowNib ? lowNib : hiNib;
-            channel.volRampTicksLeft = speed - 1;
-            // new target?
-            if (note.noteOffset)
-                channel.portaToNoteOffset = note.noteOffset;
-            if (channel.portaSpeed == 0 && channel.prevPortaSpeed)
-                channel.portaSpeed = channel.prevPortaSpeed;
+            startVolSlide(channel, note);
+            startPortamento(channel, note, true, true);
+        }
+        else if( note.effect == 0x4) // vibrato
+        {
+            startVibrato(channel, note, false);
+        }
+        else if( note.effect == 0xe && // fine volume slide
+               (note.eparm >> 4 == 0xa || note.eparm >> 4 == 0xb ))
+        {
+            int upOrDown = note.eparm >> 4 == 0xa ? (note.eparm & 0xf) : -(note.eparm & 0xf);
+            channel.vol = Clamp(0,64,channel.vol+upOrDown);
+        }
+        else if( note.effect == 0x6 ) //vibrato and volume slide.
+        {
+            startVolSlide(channel, note);
+            startVibrato(channel, note, true);
+        }
+        else if( note.effect == 0x1 || note.effect == 0x2 ) // porto up/down
+        {
+           startPortamento(channel, note, false, false);
         }
         else
         {
-            printf("effect unhandled %x%02x, row=%d, channel=%d\n", 
-                note.effect, note.eparm, currentRow, channelIdx);
+            printf("effect unhandled %x%02x, row=%d, channel=%d, pattern=%d\n", 
+                note.effect, note.eparm, currentRow, channelIdx, patternIdx );
         }
+
+        // mute other channels. testing.
+        if( devSoloChannel >= 0 && devSoloChannel != channelIdx)  channel.vol = 0;
     }
 }
 
 void Mod::updateEffects()
 {
-    int patternIdx = order[currentOrder];
+    int patternIdx = devSoloPattern >= 0 ? 
+        devSoloPattern : 
+        order[currentOrder];
+
     for(int channelIdx = 0; channelIdx < nChannels; ++channelIdx)
     {
         Channel& c = channels[channelIdx];
         Note& note = patternData[(64*nChannels*patternIdx)+(nChannels*currentRow)+channelIdx];
 
-        if( c.volRampTicksLeft >0 )
+        if( c.volSlideTicksLeft >0 )
         {
-            c.vol = Clamp(0, 64, c.vol+c.volRamp);
-            c.volRampTicksLeft--;
+            c.vol = Clamp(0, 64, c.vol+c.volSlideSpeed);
+            c.volSlideTicksLeft--;
+            //printf("Chn=%d, Vol slide speed %d, vol=%d\n", channelIdx, c.volSlideSpeed, c.vol);
         }
-        if(c.portaSpeed > 0)  
+        if(c.portaTicksLeft > 0)  
         {
-            // going up or down?
-            uint16_t targetFreqAmiga = Channel::getAmigaFreq(c.portaToNoteOffset, c.ft);
-            if( targetFreqAmiga > c.amigaPeriod ) 
-                c.amigaPeriod = Min<int>(c.amigaPeriod + c.portaSpeed, targetFreqAmiga );
-            else if( targetFreqAmiga < c.amigaPeriod )
-                c.amigaPeriod = Max<int>(c.amigaPeriod - c.portaSpeed, targetFreqAmiga);
+            if( c.portaToNoteOffset != 0)
+            {
+                // targetting a note or just an offset from where we are?
+                uint16_t targetFreqAmiga = Channel::getAmigaFreq(c.portaToNoteOffset, c.ft);
+                if (targetFreqAmiga > c.amigaPeriod)
+                    c.amigaPeriod = Min<int>(c.amigaPeriod + c.portaSpeed, targetFreqAmiga);
+                else if (targetFreqAmiga < c.amigaPeriod)
+                    c.amigaPeriod = Max<int>(c.amigaPeriod - c.portaSpeed, targetFreqAmiga);
+            }
             else 
             {
-                // we are finished moving, so stop and stash our speed incase we are retriggered.
-                c.prevPortaSpeed = c.portaSpeed;
-                c.portaSpeed = 0; // we are done.
+                c.amigaPeriod = Clamp(0, 1000, c.portaSpeed + c.amigaPeriod);
             }
-
+            c.portaTicksLeft--;
             // update date the freq.
             c.freq = Channel::amigaPeriodToHz(c.amigaPeriod);
         }
+
+        if( c.vibrTicksLeft > 0)
+        {
+            c.vibrPos += c.vibrSpeed;
+            if (c.vibrPos >= 32) 
+            {
+                c.vibrPos %= 32;
+                c.vibrInv = !c.vibrInv;
+            }
+            int period = c.amigaPeriod;
+            int vib = sine_table[c.vibrPos];
+            vib *= c.vibrDepth;
+            vib /= 128;
+            if( !c.vibrInv ) vib = -vib; 
+            period += vib;
+            
+            c.vibrTicksLeft--;
+
+            c.amigaPeriod = period;
+            if( channelIdx== devSoloChannel)
+            {
+                //printf("chn=%d vibrato: ticksleft=%d, pos=%d, depth=%d, speed=%d vib=%d, inv=%d, period=%d\n",
+                //    channelIdx, c.vibrTicksLeft, c.vibrPos, c.vibrDepth, c.vibrSpeed, vib, c.vibrInv, c.amigaPeriod );
+            }
+
+            // update freq.
+            c.freq = Channel::amigaPeriodToHz(c.amigaPeriod);
+        }
+
+        // mute other channels. testing.
+        if( devSoloChannel >= 0 && devSoloChannel != channelIdx)  c.vol = 0;
     }
 }
 
@@ -593,6 +688,12 @@ error:
 }
 
 //
+const uint8_t sine_table[32] = 
+{  0, 24, 49, 74, 97,120,141,161,
+	 180,197,212,224,235,244,250,253,
+	 255,253,250,244,235,224,212,197,
+	 180,161,141,120, 97, 74, 49, 24 };
+
 const uint16_t gNotes[12*3*16] = 
     {
         // Tuning -8
@@ -628,6 +729,7 @@ const uint16_t gNotes[12*3*16] =
         ,431,407,384,363,342,323,305,288,272,256,242,228
         ,216,203,192,181,171,161,152,144,136,128,121,114
         // normal tuning.
+        //{"C-", "C#", "D-", "D#","E-", "F-", "F#", "G-","G#","A-", "A#", "B-" };
         ,856,808,762,720,678,640,604,570,538,508,480,453 //; C-1 to B-1
         ,428,404,381,360,339,320,302,285,269,254,240,226 // ; C-2 to B-2
         ,214,202,190,180,170,160,151,143,135,127,120,113 // ; C-3 to B-3
