@@ -11,6 +11,45 @@
 
 extern const uint16_t gNotes[];
 
+enum class Effect : uint8_t
+{
+    Arpeggio = 0,
+    Porta_Up = 1,
+    Porta_Down = 2,
+    Porta_To_Note = 3,
+    Vibrato = 4,
+    Porta_Vol_Slide = 5,
+    Vibrato_Vol_Slide = 6,
+    Tremolo = 7,
+    Pan = 8,
+    Sample_Offset = 9,
+    Volume_Slide = 0xa,
+    Jump_To_Pattern = 0xb,
+    Set_Volume = 0xc,
+    Pattern_Break = 0xd,
+    Sub_Effect = 0xe,
+    Set_Speed = 0xf,
+};
+enum class EffectSubType
+{
+    Set_Filter,
+    Fine_Porta_Up,
+    Fine_Porta_Down,
+    Glissando_Control,
+    Set_Vibrato_Waveform,
+    Set_Finetune,
+    Pattern_Loop,
+    Set_Tremolo_WaveForm,
+    Unused,
+    Retrig_Note,
+    Fine_Volume_Slide_Up,
+    Fine_Volume_Slide_Down,
+    Cut_Note,
+    Delay_Note,
+    Pattern_Delay,
+    Invert_Loop,
+};
+
 struct Sample
 {
    std::string name;
@@ -22,6 +61,14 @@ struct Sample
    int8_t* data = nullptr;
 };
 
+struct Note
+{
+    uint16_t noteOffset:11;         // 0-??  = 11 bits = 0-2048 should be plenty for your needs.
+    uint8_t sampleNumber:5;         // 0-31  = 5 bits
+    Effect effect;                  // 0-15  = 4 bits, but use 8 to keep things even
+    uint8_t eparm;                  // 0-255 = 8 bits
+};
+
 struct Channel
 {
     float freq = 0.f;   // actual freq in hz to play sound.
@@ -29,6 +76,7 @@ struct Channel
     int vol = 0;
     int ft = 0;
     int pan = 0;
+    bool bSurround = false;
     int amigaPeriod = 0;
     Sample* sample = nullptr;
     
@@ -48,6 +96,16 @@ struct Channel
     bool vibrInv = false;
     int vibrDepth = 0;
     int vibrTicksLeft = 0;
+
+    // temello 
+    int tremePos = 0;
+    int tremeSpeed = 0;
+    bool tremeInv = false;
+    int tremeDepth = 0;
+    int tremeTicksLeft = 0;
+
+    int delayNoteTicksLeft = 0;
+    Note delayNote;
 
     Channel() {}
 
@@ -84,14 +142,6 @@ struct Channel
         float sampleRate );
 };
 
-struct Note
-{
-    uint16_t noteOffset:11;  // 0-??  = 11 bits = 0-2048 should be plenty for your needs.
-    uint8_t sampleNumber:5;  // 0-31  = 5 bits
-    uint8_t effect;    // 0-15  = 4 bits, but use 8 to keep things even
-    uint8_t eparm;     // 0-255 = 8 bits
-};
-
 struct Mod
 {
     int nPatterns = 0;
@@ -109,6 +159,7 @@ struct Mod
     int currentOrder = 0; // index into order table.
     int currentRow = 0;
     int currentTick = 0;
+    int patternDelay = 0;
 
     void tick();
     void updateRow(); 
@@ -117,6 +168,7 @@ struct Mod
     void startVolSlide(Channel& channel, Note& note);
     void startVibrato(Channel& channel, Note& note, bool bKeepOld);
     void startPortamento(Channel& channel, Note& note, bool bTargetNote, bool bKeepOld );
+    void startTremello(Channel& channel, Note& note);
 
     size_t makeAudio(
         std::vector<float>& mixLeft,

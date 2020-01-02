@@ -70,7 +70,7 @@ void prettyPrintNote(Note* note, int channel, int nChannels, int row)
     else
         printf(".. ");
     // effect.
-    printf("%x%02x", note->effect, note->eparm);
+    printf("%x%02x", (int)note->effect, note->eparm);
     printf("     ");
 }
 
@@ -158,18 +158,23 @@ void Mod::tick()
     if (currentTick >= currentSpeed)
     {
         std::unique_lock<std::mutex> lk(cs);
-        updateRow();
-        currentTick = 0;
-        currentRow++;
-        if( currentRow>= 64)
+        if( patternDelay <= 0)
         {
-            currentRow = 0;
-            currentOrder++;
-            if( currentOrder >= songLength )
+            updateRow();
+            currentTick = 0;
+            currentRow++;
+            if (currentRow >= 64)
             {
-                currentOrder = 0;
+                currentRow = 0;
+                currentOrder++;
+                if (currentOrder >= songLength)
+                {
+                    currentOrder = 0;
+                }
             }
         }
+        else 
+            patternDelay--;
     }
     else
     {
@@ -187,6 +192,16 @@ void Mod::startVibrato(Channel& channel, Note& note, bool bKeepOld)
         if( speed ) channel.vibrSpeed = speed;
     }
     channel.vibrTicksLeft = currentSpeed - 1;
+}
+void Mod::startTremello(Channel& channel, Note& note)
+{
+    int depth = note.eparm & 0xf;
+    int speed = (note.eparm >> 4) & 0xf;
+    if (depth)
+        channel.tremeDepth = depth;
+    if (speed)
+        channel.tremeSpeed = speed;
+    channel.tremeTicksLeft = currentSpeed - 1;
 }
 void Mod::startVolSlide(Channel& channel, Note& note)
 {
@@ -212,7 +227,7 @@ void Mod::startPortamento(Channel& channel, Note& note, bool bTargetNote, bool b
     if( !bKeepOld )
     {
         if (note.eparm)
-            channel.portaSpeed = note.effect == 0x2 ? -note.eparm : note.eparm;
+            channel.portaSpeed = note.effect == Effect::Porta_Down ? -note.eparm : note.eparm;
     }
     channel.portaTicksLeft = currentSpeed - 1;
 }
@@ -229,8 +244,10 @@ void Mod::updateRow()
         Note& note = patternData[(64*nChannels*patternIdx)+(nChannels*currentRow)+channelIdx];
         Channel& channel = channels[channelIdx];
 
+        bool bDelayNote = note.effect == Effect::Sub_Effect && static_cast<EffectSubType>(note.eparm >> 4) == EffectSubType::Delay_Note;
+
         //prettyPrintNote(&note, channelIdx, nChannels, currentRow);
-        if( note.sampleNumber )
+        if( note.sampleNumber && !bDelayNote)
         {
             Sample* smpl = &samples[note.sampleNumber];
             channel.setSample(smpl);
@@ -238,9 +255,10 @@ void Mod::updateRow()
             //printf( "chn %d, set sample %d '%s'\n", channelIdx, note.sampleNumber, smpl->name.c_str());  
         }
 
-        if( note.noteOffset != 0 ) 
+        if( note.noteOffset != 0 && !bDelayNote) 
         {
-           if (note.effect != 3 && note.effect != 5) 
+           if (note.effect != Effect::Porta_To_Note && 
+               note.effect != Effect::Porta_Vol_Slide)  
            {
                 if( channel.sample)
                     channel.ft = channel.sample->fine_tune;
@@ -254,18 +272,65 @@ void Mod::updateRow()
                     // these all reset when a new note is played.
                     channel.vibrInv = false;
                     channel.vibrPos = 0;
+                    channel.tremeInv = false;
+                    channel.tremePos = 0;
                 }
            }
         }
 
-        // fx
-        if( note.effect == 0 && note.eparm == 0)
-            int nop = 0;
-        else if (note.effect == 0xf) // set speed
-            currentSpeed = note.eparm;
-        else if (note.effect == 0xc) // set volume
+        switch(static_cast<Effect>(note.effect))
+        {
+        case Effect::Arpeggio:
+            if( note.eparm == 0 ) break;
+        default:
+            printf("effect unhandled %x%02x, row=%d, channel=%d, pattern=%d\n",
+                   (int)note.effect, (int)note.eparm, currentRow, channelIdx, patternIdx);
+            break;
+        case Effect::Tremolo:
+            startTremello(channel, note);
+            break;
+        case Effect::Pan:
+            if( note.eparm == 0 )           channel.pan = -128;
+            else if( note.eparm == 0x40)    channel.pan = 0;
+            else if( note.eparm == 0x80)    channel.pan = 127;
+            else if( note.eparm == 0xa4)    channel.bSurround = true;
+            break;
+        case Effect::Porta_Up: // fall-through.
+        case Effect::Porta_Down:
+            startPortamento(channel, note, false, false);
+            break;
+        case Effect::Porta_To_Note:
+            startPortamento(channel, note, true, false);
+            break;
+        case Effect::Porta_Vol_Slide:
+        {
+            startPortamento(channel, note, true, true );
+            startVolSlide(channel, note);    
+            break;
+        }
+        case Effect::Vibrato:
+            startVibrato(channel, note, false);
+            break;
+        case Effect::Vibrato_Vol_Slide:
+        {
+            startVibrato(channel, note, true);
+            startVolSlide(channel, note);    
+            break;
+        }
+        case Effect::Sample_Offset:
+            channel.samplePos = (note.eparm * 0x100);
+            break;
+        case Effect::Volume_Slide:
+            startVolSlide(channel, note);
+            break;
+        case Effect::Jump_To_Pattern:
+            currentOrder = note.eparm - 1;
+            currentRow = -1;
+            break;
+        case Effect::Set_Volume:
             channel.setVol(note.eparm);
-        else if (note.effect == 0xd) // pattern break.
+            break;
+        case Effect::Pattern_Break:
         {
             if (note.eparm > 64)
                 currentRow = 0;
@@ -273,53 +338,46 @@ void Mod::updateRow()
                 currentRow = note.eparm;
             currentOrder++;
             currentRow--; // We are about to increment this, so make it -1 that we want it.
+            break;
         }
-        else if (note.effect == 0xe && (note.eparm >> 4) == 0x8) // panning
+        case Effect::Sub_Effect:
         {
-            int pan = note.eparm & 0xf;
-            pan -= 8;
-            channel.pan = pan * 8;
-        }
-        else if (note.effect == 0x9) // sample offset.
-            channel.samplePos = (note.eparm * 0x100);
-        else if (note.effect == 0xa) // volume slide
-        {
-            startVolSlide(channel, note);
-        }
-        else if (note.effect == 0x3) // porta to note.
-        {
-            startPortamento(channel, note, true, false);
-        }
-        else if(note.effect == 0x5) // porta to note and volume slide combo.
-        {
-            startVolSlide(channel, note);
-            startPortamento(channel, note, true, true);
-        }
-        else if( note.effect == 0x4) // vibrato
-        {
-            startVibrato(channel, note, false);
-        }
-        else if( note.effect == 0xe && // fine volume slide
-               (note.eparm >> 4 == 0xa || note.eparm >> 4 == 0xb ))
-        {
-            int upOrDown = note.eparm >> 4 == 0xa ? (note.eparm & 0xf) : -(note.eparm & 0xf);
-            channel.vol = Clamp(0,64,channel.vol+upOrDown);
-        }
-        else if( note.effect == 0x6 ) //vibrato and volume slide.
-        {
-            startVolSlide(channel, note);
-            startVibrato(channel, note, true);
-        }
-        else if( note.effect == 0x1 || note.effect == 0x2 ) // porto up/down
-        {
-           startPortamento(channel, note, false, false);
-        }
-        else
-        {
-            printf("effect unhandled %x%02x, row=%d, channel=%d, pattern=%d\n", 
-                note.effect, note.eparm, currentRow, channelIdx, patternIdx );
+            int param = note.eparm & 0xff;
+            switch(static_cast<EffectSubType>(note.eparm>>4))
+            {
+            default:
+                printf("effect unhandled %x%02x, row=%d, channel=%d, pattern=%d\n", 
+                (int)note.effect, note.eparm, currentRow, channelIdx, patternIdx );
+                break;
+            case EffectSubType::Delay_Note:
+                channel.delayNote = note;
+                channel.delayNoteTicksLeft = param;
+                break;
+            case EffectSubType::Pattern_Delay:
+                patternDelay = param;
+                break;
+            case EffectSubType::Fine_Volume_Slide_Down:
+                channel.vol = Clamp(0,64,channel.vol-param); 
+                break;
+            case EffectSubType::Fine_Volume_Slide_Up:          
+                channel.vol = Clamp(0,64,channel.vol+param); 
+                break;
+            case EffectSubType::Fine_Porta_Down:
+                channel.amigaPeriod = Clamp(0,1000, channel.amigaPeriod - param);
+                channel.freq = Channel::amigaPeriodToHz(channel.amigaPeriod);
+                break;
+            case EffectSubType::Fine_Porta_Up:
+                channel.amigaPeriod = Clamp(0,1000, channel.amigaPeriod + param);
+                channel.freq = Channel::amigaPeriodToHz(channel.amigaPeriod);
+                break;
+            }
+            break;
         }
 
+        case Effect::Set_Speed:
+            currentSpeed = note.eparm;
+            break;
+        }
         // mute other channels. testing.
         if( devSoloChannel >= 0 && devSoloChannel != channelIdx)  channel.vol = 0;
     }
@@ -361,7 +419,34 @@ void Mod::updateEffects()
             // update date the freq.
             c.freq = Channel::amigaPeriodToHz(c.amigaPeriod);
         }
+        if( c.tremeTicksLeft > 0)
+        {
+            c.tremePos += c.tremeSpeed;
+            if (c.tremePos >= 32) 
+            {
+                c.tremePos %= 32;
+                c.tremeInv = !c.tremeInv;
+            }
+            int period = c.amigaPeriod;
+            int tre = sine_table[c.vibrPos];
+            tre *= c.tremeDepth;
+            tre /= 64;
+            if( !c.tremeInv ) tre = -tre; 
+            period += tre;
+            
+            c.tremeTicksLeft--;
 
+            c.amigaPeriod = period;
+            if( channelIdx== devSoloChannel)
+            {
+                //printf("chn=%d vibrato: ticksleft=%d, pos=%d, depth=%d, speed=%d vib=%d, inv=%d, period=%d\n",
+                //    channelIdx, c.vibrTicksLeft, c.vibrPos, c.vibrDepth, c.vibrSpeed, vib, c.vibrInv, c.amigaPeriod );
+            }
+
+            // update freq.
+            c.freq = Channel::amigaPeriodToHz(c.amigaPeriod);
+            c.tremeTicksLeft--;
+        }
         if( c.vibrTicksLeft > 0)
         {
             c.vibrPos += c.vibrSpeed;
@@ -388,6 +473,22 @@ void Mod::updateEffects()
 
             // update freq.
             c.freq = Channel::amigaPeriodToHz(c.amigaPeriod);
+        }
+
+        if( c.delayNoteTicksLeft > 0)
+        {
+            c.delayNoteTicksLeft--;
+            // time to trigger?
+            if( c.delayNoteTicksLeft == 0 && c.delayNote.sampleNumber > 0)
+            {
+                if( Sample* s = &samples[c.delayNote.sampleNumber] )
+                    c.setSample(s);
+                if( int period = Channel::getAmigaFreq(c.delayNote.noteOffset, c.ft) )
+                {
+                    c.amigaPeriod = period;                    
+                    c.freq = Channel::amigaPeriodToHz(c.amigaPeriod);
+                }
+            }
         }
 
         // mute other channels. testing.
@@ -571,7 +672,7 @@ bool loadMod(void* mem, size_t size)
             int period = ((byte0 & 0x0F) << 8) | byte1;
             note->noteOffset = findOffsetFromPeriod(period);  
             note->sampleNumber = (byte0 & 0xF0) | (byte2 >> 4);
-            note->effect = byte2 & 0x0F;
+            note->effect = static_cast<Effect>(byte2 & 0x0F);
             note->eparm = byte3;
 
             prettyPrintNote(note, j % nChannels, nChannels, j / nChannels );
