@@ -94,21 +94,26 @@ void Channel::setSample(Sample* s)
     ft = sample->fine_tune;
 }
 
+static const float s8ToFloatRecp = 1.f / 127.f;
+static const float vol64FloatRecp = 1.f / 64.f;
+
 // render thread.
 int Channel::makeAudio(
     std::vector<float>& leftMix,
     std::vector<float>& rightMix,
     int frameSize,
-    float sampleRate)
+    uint32_t sampleRate)
 {
-    if( freq <= 0)
+    if( amigaPeriod <= 0)
         return 0;
     if( !sample )
         return 0;
-    if( samplePos < 0)
+    if( samplePos == ~0)
         return 0;
 
-    float srcStep = freq / (double)sampleRate;
+    uint32_t freq = amigaPeriodToHz(amigaPeriod);
+    uint32_t srcStep = (uint64_t)(freq << 16) / sampleRate;
+    //float srcStep = freq / (double)sampleRate;
 
     float end = sample->loop_length > 0 ?
                 sample->loop_start + sample->loop_length :
@@ -116,8 +121,6 @@ int Channel::makeAudio(
 
     float* left = leftMix.data();
     float* right = rightMix.data();
-    static const float s8ToFloatRecp = 1.f / 127.f;
-    static const float vol64FloatRecp = 1.f / 64.f;
     float fltvol = (float)vol * vol64FloatRecp;
 
     // too sleepy, think about this properly.
@@ -127,26 +130,28 @@ int Channel::makeAudio(
     int i = 0; 
     while( i < frameSize )
     {
+        int pos = samplePos>>16;
+
         // handle end of sample.
-        if( samplePos >= end )
+        if( pos >= end )
         {
             // looping?
             if( sample->loop_length > 0)
-                samplePos = sample->loop_start;
+                samplePos = (uint32_t)sample->loop_start << 16;
             else 
             {
-                samplePos = -1.f;
+                samplePos = ~0;
                 break;
             }
         }
 
-        float s = (float) sample->data[(int)samplePos];
+        float s = (float) sample->data[pos];
         s*= s8ToFloatRecp;
         s*= fltvol;
         (*left++) += s;
         (*right++) += s;
         
-        samplePos+=srcStep;
+        samplePos += srcStep;
         ++i;
     }
     return i;
@@ -267,7 +272,6 @@ void Mod::updateRow()
                 if( period > 0 )
                 {
                     channel.amigaPeriod = period;
-                    channel.freq = Channel::amigaPeriodToHz(period);
 
                     // these all reset when a new note is played.
                     channel.vibrInv = false;
@@ -318,7 +322,7 @@ void Mod::updateRow()
             break;
         }
         case Effect::Sample_Offset:
-            channel.samplePos = (note.eparm * 0x100);
+            channel.samplePos = (note.eparm * 0x100) << 16;
             break;
         case Effect::Volume_Slide:
             startVolSlide(channel, note);
@@ -364,11 +368,9 @@ void Mod::updateRow()
                 break;
             case EffectSubType::Fine_Porta_Down:
                 channel.amigaPeriod = Clamp(0,1000, channel.amigaPeriod - param);
-                channel.freq = Channel::amigaPeriodToHz(channel.amigaPeriod);
                 break;
             case EffectSubType::Fine_Porta_Up:
                 channel.amigaPeriod = Clamp(0,1000, channel.amigaPeriod + param);
-                channel.freq = Channel::amigaPeriodToHz(channel.amigaPeriod);
                 break;
             }
             break;
@@ -416,8 +418,6 @@ void Mod::updateEffects()
                 c.amigaPeriod = Clamp(0, 1000, c.portaSpeed + c.amigaPeriod);
             }
             c.portaTicksLeft--;
-            // update date the freq.
-            c.freq = Channel::amigaPeriodToHz(c.amigaPeriod);
         }
         if( c.tremeTicksLeft > 0)
         {
@@ -443,8 +443,6 @@ void Mod::updateEffects()
                 //    channelIdx, c.vibrTicksLeft, c.vibrPos, c.vibrDepth, c.vibrSpeed, vib, c.vibrInv, c.amigaPeriod );
             }
 
-            // update freq.
-            c.freq = Channel::amigaPeriodToHz(c.amigaPeriod);
             c.tremeTicksLeft--;
         }
         if( c.vibrTicksLeft > 0)
@@ -470,9 +468,6 @@ void Mod::updateEffects()
                 //printf("chn=%d vibrato: ticksleft=%d, pos=%d, depth=%d, speed=%d vib=%d, inv=%d, period=%d\n",
                 //    channelIdx, c.vibrTicksLeft, c.vibrPos, c.vibrDepth, c.vibrSpeed, vib, c.vibrInv, c.amigaPeriod );
             }
-
-            // update freq.
-            c.freq = Channel::amigaPeriodToHz(c.amigaPeriod);
         }
 
         if( c.delayNoteTicksLeft > 0)
@@ -486,7 +481,6 @@ void Mod::updateEffects()
                 if( int period = Channel::getAmigaFreq(c.delayNote.noteOffset, c.ft) )
                 {
                     c.amigaPeriod = period;                    
-                    c.freq = Channel::amigaPeriodToHz(c.amigaPeriod);
                 }
             }
         }
@@ -499,11 +493,11 @@ void Mod::updateEffects()
  size_t Mod::makeAudio(
     std::vector<float>& leftMix,
     std::vector<float>& rightMix,
-    float sampleRate, 
+    uint32_t sampleRate, 
     int frameSize)
 {
     std::unique_lock<std::mutex> lk(cs);
-    int o,f,n;
+    
     int made = 0;
     for(int i = 0; i < nChannels; ++i)
     {

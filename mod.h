@@ -71,8 +71,7 @@ struct Note
 
 struct Channel
 {
-    float freq = 0.f;   // actual freq in hz to play sound.
-    float samplePos = -1; // float for now.
+    uint32_t samplePos = ~0; // fixed point, unsigned 16:16
     int vol = 0;
     int ft = 0;
     int pan = 0;
@@ -109,10 +108,12 @@ struct Channel
 
     Channel() {}
 
-    static float amigaPeriodToHz(int amigaFreq)
+    static uint32_t amigaPeriodToHz(int amigaFreq)
     {
         assert(amigaFreq > 0);
-        return (float)7159090.5f / (amigaFreq * 2);
+        //return (float)7159090.5f / (amigaFreq * 2);
+        return 7159090 / (amigaFreq*2); 
+
     }
     static int getAmigaFreq(uint16_t offsetInNoteTable, int finetune = 0)
     {
@@ -139,7 +140,7 @@ struct Channel
         std::vector<float>& leftMix,
         std::vector<float>& rightMix,
         int frameSize,
-        float sampleRate );
+        uint32_t sampleRate );
 };
 
 struct Mod
@@ -173,5 +174,5 @@ struct Mod
     size_t makeAudio(
         std::vector<float>& mixLeft,
         std::vector<float>& mixRight,
-        float sampleRate, int frameSize);
+        uint32_t sampleRate, int frameSize);
 }; 
