@@ -27,6 +27,24 @@ int devSoloPattern = -1;
 #define SAMPLE_RATE (48000)
 #define NUM_SECONDS (60)
 
+
+float lerp( float s1, float s2, float t )
+{
+    float d = s2-s1;
+    float l = s1 + (d*t);    
+    return l;
+}
+
+int32_t lerpFixed( int32_t s1, int32_t s2, uint32_t t)
+{
+    int32_t d = (s2-s1) << 16;
+    int32_t p = ((int64_t)(d*t) / (1 << 16)); 
+    int32_t l = s1 + (p / (1 << 16));
+    return l;
+    // fp_fract 0...65535 (0...100)
+    //uint32_t (65535 - fp_fract);
+}
+
 uint16_t findOffsetFromPeriod(int amigaFreq)
 {    
     if( amigaFreq <= 0) return 0;
@@ -145,8 +163,19 @@ int Channel::makeAudio(
             }
         }
 
-        float s = (float) sample->data[pos];
-        s*= s8ToFloatRecp;
+        int32_t s1 = sample->data[pos];
+        int32_t s2 = (pos+1 < end) ?
+            sample->data[pos+1] :
+            0;
+        int32_t si = lerpFixed(s1, s2, samplePos & 0xffff);
+        float s = (float)si * s8ToFloatRecp;
+
+        //float s1 = (float) sample->data[pos] * s8ToFloatRecp;
+        //float s2 = (pos+1 < end) ?
+        //    (float) sample->data[pos+1] * s8ToFloatRecp :
+        //    0.0f;
+        //float s = lerp(s1, s2, (float)((uint32_t)samplePos & 0xff) / 65535.f) ;
+    
         s*= fltvol;
         (*left++) += s;
         (*right++) += s;
@@ -489,6 +518,7 @@ void Mod::updateEffects()
         if( devSoloChannel >= 0 && devSoloChannel != channelIdx)  c.vol = 0;
     }
 }
+
 
  size_t Mod::makeAudio(
     std::vector<float>& leftMix,
