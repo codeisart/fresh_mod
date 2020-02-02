@@ -12,6 +12,10 @@
 #include <functional>
 #include <map>
 #include <sstream>
+#include <tgmath.h>
+#include <ncurses.h>
+#include <unistd.h>
+
 #include "util.h"
 #include "mod.h"
 
@@ -20,6 +24,11 @@ extern const uint16_t gNotes[];
 extern const uint8_t sine_table[32];
 Mod gMod;
 
+// mix buffers.
+std::mutex gMixCs;
+std::vector<float> gLeftMix;
+std::vector<float> gRightMix;
+
 // solo for debugging.
 int devSoloChannel = -1;
 int devSoloPattern = -1;
@@ -27,6 +36,15 @@ int devSoloPattern = -1;
 #define SAMPLE_RATE (48000)
 #define NUM_SECONDS (60)
 
+float linearToDb(float f)
+{
+    static const float kSmallNumber = 1.e-8f;
+    if( f > kSmallNumber )
+    	return 20.f * log10f(f);
+    
+    return -96.f;
+}
+template<typename T> T clamp(T mn, T mx, T v) { return v <  mn ? mn : v > mx ? mx : v; }
 
 float lerp( float s1, float s2, float t )
 {
@@ -112,7 +130,7 @@ void Channel::setSample(Sample* s)
     ft = sample->fine_tune;
 }
 
-static const float s8ToFloatRecp = 1.f / 127.f;
+static const float s8ToFloatRecp = 1.f / 128.f;
 static const float vol64FloatRecp = 1.f / 64.f;
 
 // render thread.
@@ -146,6 +164,7 @@ int Channel::makeAudio(
     float fltRightPan = Max(0, pan) * vol64FloatRecp; 
 
     int i = 0; 
+    float sum = 0.f;
     while( i < frameSize )
     {
         int pos = samplePos>>16;
@@ -170,6 +189,7 @@ int Channel::makeAudio(
         int32_t si = lerpFixed(s1, s2, samplePos & 0xffff);
         float s = (float)si * s8ToFloatRecp;
 
+
         //float s1 = (float) sample->data[pos] * s8ToFloatRecp;
         //float s2 = (pos+1 < end) ?
         //    (float) sample->data[pos+1] * s8ToFloatRecp :
@@ -180,9 +200,13 @@ int Channel::makeAudio(
         (*left++) += s;
         (*right++) += s;
         
+	sum +=s*s;
         samplePos += srcStep;
         ++i;
     }
+
+    float avgPow = (float)sum / frameSize;
+    vuDb = linearToDb(avgPow);
     return i;
 }
 
@@ -554,20 +578,23 @@ static int patestCallback( const void *inputBuffer, void *outputBuffer,
                            PaStreamCallbackFlags statusFlags,
                            void *userData )
 {
+    std::unique_lock<std::mutex> lk(gMixCs);
     /* Cast data passed through stream to our structure. */
     float *out = (float*)outputBuffer;
     (void) inputBuffer; /* Prevent unused variable warning. */
 
-    std::vector<float> leftMix;
-    std::vector<float> rightMix;
-    leftMix.resize(framesPerBuffer);
-    rightMix.resize(framesPerBuffer);
-    gMod.makeAudio(leftMix,rightMix, SAMPLE_RATE, framesPerBuffer);
+    gLeftMix.resize(framesPerBuffer);
+    gRightMix.resize(framesPerBuffer);
+    gMod.makeAudio(gLeftMix,gRightMix, SAMPLE_RATE, framesPerBuffer);
+    float summedPow = 0;
+    const float* leftMix = gLeftMix.data();
+    const float* rightMix = gRightMix.data();
     for( int i=0; i<framesPerBuffer; i++ )
     {
-        *out++ = leftMix[i];
-        *out++ = rightMix[i];
+        *out++ = *leftMix++;
+        *out++ = *rightMix++;
     }
+
     return 0;
 }
 
@@ -646,8 +673,8 @@ bool loadMod(void* mem, size_t size)
         
         if( s.length )
         {
-            printf("%d, name='%s', length=0x%x, finetune=%d, vol=%d, loopstart=%x, looplength=%x\n", 
-                i, name, (int)s.length, s.fine_tune, s.volume, s.loop_start, s.loop_length);
+            //printf("%d, name='%s', length=0x%x, finetune=%d, vol=%d, loopstart=%x, looplength=%x\n", 
+            //    i, name, (int)s.length, s.fine_tune, s.volume, s.loop_start, s.loop_length);
         }
         gMod.samples[i] = std::move(s);
     }
@@ -669,10 +696,10 @@ bool loadMod(void* mem, size_t size)
        if( i < gMod.songLength )
        {
            gMod.order[i] = order;
-           printf("%02x, ",order);
+           //printf("%02x, ",order);
        }
     }
-    printf("\nLength=%02x, nPatterns=%02x\n", gMod.songLength, gMod.nPatterns);
+    //printf("\nLength=%02x, nPatterns=%02x\n", gMod.songLength, gMod.nPatterns);
     assert((uintptr_t)readPtr8 - (uintptr_t)mem == 1080);
 
     //- read 4 bytes, discard them (we are at position 1080 again, this is M.K. etc!)
@@ -684,7 +711,7 @@ bool loadMod(void* mem, size_t size)
     for(int i = 0; i< gMod.nPatterns; ++i)
     {
         Note* note = &gMod.patternData[(gMod.nChannels * 64 * i)];
-        printf("\npattern=%02x", i);
+        //printf("\npattern=%02x", i);
         for(int j = 0; j < gMod.nChannels * 64; j++)
         {
             uint16_t byte0 = *readPtr8++;
@@ -699,11 +726,11 @@ bool loadMod(void* mem, size_t size)
             note->effect = static_cast<Effect>(byte2 & 0x0F);
             note->eparm = byte3;
 
-            prettyPrintNote(note, j % nChannels, nChannels, j / nChannels );
+            //prettyPrintNote(note, j % nChannels, nChannels, j / nChannels );
             note++;  
         }
     }
-    printf("\n");
+    //printf("\n");
 
     int8_t* samples = (int8_t*)mem+size;
 
@@ -749,6 +776,77 @@ bool loadMod(const char* filename)
     return false;
 }
 
+void initGfx()
+{
+    initscr();
+    cbreak();
+    nodelay(stdscr,TRUE);
+    nonl();
+    intrflush(stdscr,TRUE);
+    curs_set(FALSE);
+}
+void deinitGfx()
+{
+    endwin();    
+}
+
+float norm(float min, float max, float v)
+{
+	float c = v < min ? min : v > max ? max : v;
+	float recp = 1.f / (max-min);
+	return c*recp;
+}
+
+int min(int a, int b) { return a > b ? b : a; }
+
+void inputLoop()
+{
+    bool bQuit = false;
+    while(!bQuit)
+    {
+	int c = getch();
+	if( c == 'q' ) bQuit = true;
+
+	// draw vu
+	clear();
+	int y,x;
+	getmaxyx(stdscr,y,x);
+
+	std::vector<float> l, r;
+	{	
+        	std::unique_lock<std::mutex> lk(gMixCs);
+		l = std::move(gLeftMix);
+		r = std::move(gRightMix);
+	}
+	if( r.size() > 0)
+	{	
+		int mid = y/2;
+		float pos = 0;
+		float step = x > 0 ? (float)(l.size()-1) / x : 0;
+		for(int i = 0; i < x; ++i, pos+=step )
+		{
+			//fprintf(stderr, "pos=%d, %f\n", (int)pos, pos);
+			pos = clamp(0.0f, (float)l.size()-1, pos);	
+			float s = r[(int)pos];
+			s = fabs(s);
+			int starty = (float)mid * s;
+			mvvline(mid-starty,i, 0, starty*2);
+		}
+
+		for( int i = 0; i < gMod.nChannels; ++i )
+		{
+			float nvu = fabs(norm(-96.f, 0, gMod.channels[i].vuDb));
+			float wid = (float) (1.f - nvu) * x; 
+			mvhline(i, 0, 0, wid);
+			//float wid = (float) (1.f - nvu) * y; 
+			//mvvline(y-wid, i, 0, wid);
+		}
+	}
+	usleep(30000);
+	refresh();
+    }
+}
+
 int main(int argc, char** argv)
 {
     if( argc <= 1 )
@@ -766,8 +864,6 @@ int main(int argc, char** argv)
     int line;
   
     PaStream *stream = 0;
-
-    
 
     ERR_WRAP(Pa_Initialize());
 
@@ -793,10 +889,17 @@ int main(int argc, char** argv)
     ERR_WRAP(Pa_StartStream( stream ));
     timer_start([&]{gMod.tick();}, 18);
 
-    Pa_Sleep(NUM_SECONDS*100000);
+    initGfx();
+    clear();
+    refresh();
+
+    inputLoop();
+    
+    //Pa_Sleep(NUM_SECONDS*100001);
 
     ERR_WRAP(Pa_StopStream( stream ));
     ERR_WRAP(Pa_Terminate());
+    deinitGfx();
     return 0;
 
 error:

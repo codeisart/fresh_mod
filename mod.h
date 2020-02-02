@@ -78,6 +78,7 @@ struct Channel
     bool bSurround = false;
     int amigaPeriod = 0;
     Sample* sample = nullptr;
+    float vuDb = -96.f;
     
     // volume slide
     int volSlideSpeed = 0;
