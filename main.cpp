@@ -15,6 +15,7 @@
 #include <tgmath.h>
 #include <ncurses.h>
 #include <unistd.h>
+#include <immintrin.h>
 
 #include "util.h"
 #include "mod.h"
@@ -36,11 +37,31 @@ int devSoloPattern = -1;
 #define SAMPLE_RATE (48000)
 #define NUM_SECONDS (60)
 
+// This is a fast approximation to log2()
+// Y = C[0]*F*F*F + C[1]*F*F + C[2]*F + C[3] + E;
+float log2f_approx(float X) {
+  float Y, F;
+  int E;
+  F = frexpf(fabsf(X), &E);
+  Y = 1.23149591368684f;
+  Y *= F;
+  Y += -4.11852516267426f;
+  Y *= F;
+  Y += 6.02197014179219f;
+  Y *= F;
+  Y += -3.13396450166353f;
+  Y += E;
+  return(Y);
+}
+
+//log10f is exactly log2(x)/log2(10.0f)
+#define log10f_fast(x)  (log2f_approx(x)*0.3010299956639812f)
+
 float linearToDb(float f)
 {
     static const float kSmallNumber = 1.e-8f;
     if( f > kSmallNumber )
-    	return 20.f * log10f(f);
+    	return 20.f * log10f_fast(f); //log10f(f);
     
     return -96.f;
 }
