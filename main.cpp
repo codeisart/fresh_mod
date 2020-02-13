@@ -16,6 +16,7 @@
 #include <ncurses.h>
 #include <unistd.h>
 #include <immintrin.h>
+#include <fftw3.h>
 
 #include "util.h"
 #include "mod.h"
@@ -34,8 +35,36 @@ std::vector<float> gRightMix;
 int devSoloChannel = -1;
 int devSoloPattern = -1;
 
+// fftw
+double* gInBuff=nullptr;
+fftw_complex* gOutBuff=nullptr;
+float* gPowerSpectrum = nullptr;
+fftw_plan gPlan;
+
+void initFft(int bufSize)
+{
+    gInBuff = (double*)fftw_malloc(sizeof(double)*bufSize);
+    gOutBuff = fftw_alloc_complex(bufSize/2+1);;
+    gPlan = fftw_plan_dft_r2c_1d(bufSize, gInBuff, gOutBuff, FFTW_ESTIMATE);
+    if(!gPlan){
+	printf("fuck\n");
+	exit(0);
+    }
+    gPowerSpectrum = (float*)fftw_malloc(sizeof(float)*bufSize);
+}
+void deinitFft()
+{   
+    fftw_destroy_plan(gPlan);
+    fftw_free(gInBuff); gInBuff=nullptr;
+    fftw_free(gOutBuff); gOutBuff=nullptr;
+    fftw_free(gPowerSpectrum); gPowerSpectrum=nullptr;
+}
+
+
 #define SAMPLE_RATE (48000)
 #define NUM_SECONDS (60)
+
+static const uint32_t kFrameSize=512;
 
 // This is a fast approximation to log2()
 // Y = C[0]*F*F*F + C[1]*F*F + C[2]*F + C[3] + E;
@@ -615,6 +644,28 @@ static int patestCallback( const void *inputBuffer, void *outputBuffer,
         *out++ = *leftMix++;
         *out++ = *rightMix++;
     }
+    // fft.
+    for( int i=0;i < framesPerBuffer; ++i)
+    {
+	gInBuff[i] = gLeftMix[i];
+    }
+    // han window.
+    for( int i=0;i < framesPerBuffer; ++i)
+    {
+	float multiplier = 0.5f * (1.f - cosf((float)2.f*M_PI*i/framesPerBuffer));
+	gInBuff[i]*=multiplier;
+    }
+    
+    fftw_execute(gPlan);
+
+    gPowerSpectrum[0] = gOutBuff[0][0]*gOutBuff[0][0];
+    for( int i=1; i< (framesPerBuffer+1)/2; i++)
+    {
+	float rl =gOutBuff[i][0];
+	float im =gOutBuff[i][1];
+	gPowerSpectrum[i] = (rl*rl) + (im*im);
+    }
+    gPowerSpectrum[framesPerBuffer/2] = gOutBuff[framesPerBuffer/2][0]*gOutBuff[framesPerBuffer][0];
 
     return 0;
 }
@@ -851,7 +902,7 @@ void inputLoop()
 			float s = r[(int)pos];
 			s = fabs(s);
 			int starty = (float)mid * s;
-			mvvline(mid-starty,i, 0, starty*2);
+			//mvvline(mid-starty,i, 0, starty*2);
 		}
 
 		for( int i = 0; i < gMod.nChannels; ++i )
@@ -862,7 +913,20 @@ void inputLoop()
 			//float wid = (float) (1.f - nvu) * y; 
 			//mvvline(y-wid, i, 0, wid);
 		}
+		
+		for( int i = 0; i < x; ++i )
+		{
+		    float posx = ((float)i / x)*(float)(kFrameSize/4+1);
+		    float p = gPowerSpectrum[(int)posx];
+		    float pl = linearToDb(p);
+		    //float nvu = norm(-96,0,pl);
+		    float nvu = fabs(norm(0, 100, pl));
+		    //float wid = (float) (1.f-nvu) * (y/4); 
+		    float wid = (float) (nvu) * y; 
+		    mvvline(y-wid,i, 0, wid);
+		}
 	}
+
 	usleep(30000);
 	refresh();
     }
@@ -894,8 +958,8 @@ int main(int argc, char** argv)
                                 2,          /* stereo output */
                                 paFloat32,  /* 32 bit floating point output */
                                 SAMPLE_RATE,
-                                //1024,
-                                paFramesPerBufferUnspecified,        
+                                kFrameSize,
+                                //paFramesPerBufferUnspecified,        
                                                     /* frames per buffer, i.e. the number
                                                    of sample frames that PortAudio will
                                                    request from the callback. Many apps
@@ -910,6 +974,7 @@ int main(int argc, char** argv)
     ERR_WRAP(Pa_StartStream( stream ));
     timer_start([&]{gMod.tick();}, 18);
 
+    initFft(kFrameSize);
     initGfx();
     clear();
     refresh();
@@ -921,6 +986,7 @@ int main(int argc, char** argv)
     ERR_WRAP(Pa_StopStream( stream ));
     ERR_WRAP(Pa_Terminate());
     deinitGfx();
+    deinitFft();
     return 0;
 
 error:
