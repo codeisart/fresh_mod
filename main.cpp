@@ -878,6 +878,8 @@ void inputLoop()
     {
 	int c = getch();
 	if( c == 'q' ) bQuit = true;
+	else if( c >= '0' && c <= '9' ) devSoloChannel = c-'0';
+	else if( c == 's' ) devSoloChannel=-1;
 
 	// draw vu
 	clear();
