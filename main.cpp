@@ -1,25 +1,25 @@
-#include "portaudio.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <memory.h>
 #include <assert.h>
-#include <thread>         // std::thread
-#include <condition_variable>
 #include <atomic>
 #include <chrono>
-#include <string>
-#include <vector>
-#include <functional>
-#include <map>
-#include <sstream>
-#include <tgmath.h>
-#include <ncurses.h>
-#include <unistd.h>
-#include <immintrin.h>
+#include <condition_variable>
 #include <fftw3.h>
+#include <functional>
+#include <immintrin.h>
+#include <map>
+#include <memory.h>
+#include <ncurses.h>
+#include <sstream>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string>
+#include <tgmath.h>
+#include <thread>         // std::thread
+#include <unistd.h>
+#include <vector>
 
-#include "util.h"
 #include "mod.h"
+#include "portaudio.h"
+#include "util.h"
 
 static const char* notestr[] = {"C-", "C#", "D-", "D#","E-", "F-", "F#", "G-","G#","A-", "A#", "B-" };
 extern const uint16_t gNotes[];
