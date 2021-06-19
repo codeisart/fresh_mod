@@ -69,6 +69,78 @@ struct Note
     uint8_t eparm;                  // 0-255 = 8 bits
 };
 
+struct Voice
+{
+    int id = 0;
+    Sample* sample = nullptr;    
+    uint32_t samplePos = ~0; // fixed point, unsigned 16:16
+    int vol = 0;
+    int pan = 0;
+    int freq = 0;
+    bool bDying = false;
+    bool bDead = false;
+
+    size_t makeAudio(
+        std::vector<float>& mixLeft,
+        std::vector<float>& mixRight,
+        uint32_t sampleRate, 
+        int frameSize);
+};
+struct VoiceMgr
+{
+    using Voices = std::vector<Voice*>;
+    Voices playing;
+    Voices dying;
+
+    std::mutex cmdsCs;
+    std::vector<std::function<void()>> cmds;
+
+    size_t makeAudio(
+        std::vector<float>& mixLeft,
+        std::vector<float>& mixRight,
+        uint32_t sampleRate, 
+        int frameSize
+    );
+
+    int play(Sample* smpl, int vol, int freq, int pan)
+    {
+        static int counter=1;
+        std::lock_guard<std::mutex> lock(cmdsCs);
+        int id = counter++;
+        cmds.push_back([smpl, vol, freq, pan, id, this]{
+            playing.push_back(new Voice {id, smpl, 0, vol, pan, freq } );
+        });      
+        return id;
+    }
+
+    void setX(int id, std::function<void(Voice*)> cmd)
+    {
+        std::lock_guard<std::mutex> lock(cmdsCs);
+        cmds.push_back([id,cmd,this] {
+            for (Voice *i : playing)
+            {
+                if (i->id == id)
+                {
+                    cmd(i);
+                    return;
+                }
+            }
+            for (Voice *i : dying)
+            {
+                if (i->id == id)
+                {
+                    cmd(i);
+                    return;
+                }
+            }
+        });
+    }
+    void kill(int id) { setX(id,[](Voice* v) { v->bDying = true; }); }
+    void setVol(int id, int vol) { setX(id,[vol](Voice* v) { v->vol=vol; } ); }
+    void setPan(int id, int pan) { setX(id,[pan](Voice* v) { v->pan=pan; } ); }
+    void setFreq(int id, int freq) { setX(id,[freq](Voice* v) { v->freq=freq; } ); }
+};
+
 struct Channel
 {
     uint32_t samplePos = ~0; // fixed point, unsigned 16:16
@@ -79,6 +151,7 @@ struct Channel
     int amigaPeriod = 0;
     Sample* sample = nullptr;
     float vuDb = -96.f;
+    int voiceHandle = -1;
     
     // volume slide
     int volSlideSpeed = 0;
@@ -133,8 +206,11 @@ struct Channel
 
     // playback
     void setSample(Sample* s);
-    void setFineTune(int ftune) { ft = ftune; }
-    void setVol(int v) { vol = v; }
+    void setFineTune(int ftune);
+    void setAmigaPeriod(int ap);
+    void setVol(int v);
+
+    void updateVoice();
 
     // render thread.
     int makeAudio(

@@ -21,10 +21,15 @@
 #include "portaudio.h"
 #include "util.h"
 
+#define WITH_DISPLAY (1)
+
+static const float s8ToFloatRecp = 1.f / 128.f;
+static const float vol64FloatRecp = 1.f / 64.f;
 static const char* notestr[] = {"C-", "C#", "D-", "D#","E-", "F-", "F#", "G-","G#","A-", "A#", "B-" };
 extern const uint16_t gNotes[];
 extern const uint8_t sine_table[32];
 Mod gMod;
+VoiceMgr gVoiceMgr;
 
 // mix buffers.
 std::mutex gMixCs;
@@ -173,15 +178,146 @@ void timer_start(std::function<void(void)> func, unsigned int interval)
   }).detach();
 }
 
+size_t VoiceMgr::makeAudio(
+    std::vector<float>& leftMix,
+    std::vector<float>& rightMix,
+    uint32_t sampleRate,
+    int frameSize)
+{
+    {
+	    std::lock_guard<std::mutex> guard(cmdsCs);
+	    for(auto i:cmds)
+	        i();
+    	cmds.clear();
+    }
+    for(Voices::iterator i = playing.begin(); i!= playing.end(); ) 
+    {
+        (*i)->makeAudio(leftMix, rightMix, sampleRate, frameSize);
+        if ((*i)->bDying)
+        {
+            //dying.push_back(*i);
+            i = playing.erase(i);
+        }
+        else
+        {
+            ++i;
+        }
+    }
+    for (Voices::iterator i = dying.begin(); i != dying.end(); )  
+    {
+        (*i)->makeAudio(leftMix, rightMix, sampleRate, frameSize);
+        if ((*i)->bDead)
+        {
+            i = dying.erase(i);
+        }
+        else
+        {
+            ++i;
+        }
+    }
+
+    return frameSize;
+}
+
+size_t Voice::makeAudio(
+    std::vector<float> &mixLeft,
+    std::vector<float> &mixRight,
+    uint32_t sampleRate,
+    int frameSize)
+{
+    if( !sample )
+        return 0;
+    if( samplePos == ~0)
+        return 0;
+
+    uint32_t srcStep = (uint64_t)(freq << 16) / sampleRate;
+    //float srcStep = freq / (double)sampleRate;
+
+    float end = sample->loop_length > 0 ?
+                sample->loop_start + sample->loop_length :
+                sample->length;
+
+    float* left = mixLeft.data();
+    float* right = mixRight.data();
+    float fltvol = (float)vol * vol64FloatRecp;
+
+    // too sleepy, think about this properly.
+    float fltLeftPan  = Abs(Min(0, pan)) * vol64FloatRecp;
+    float fltRightPan = Max(0, pan) * vol64FloatRecp; 
+
+    int i = 0; 
+    float sum = 0.f;
+    while( i < frameSize )
+    {
+        int pos = samplePos>>16;
+
+        // handle end of sample.
+        if( pos >= end )
+        {
+            // looping?
+            if( sample->loop_length > 0)
+                samplePos = (uint32_t)sample->loop_start << 16;
+            else 
+            {
+                samplePos = ~0;
+                break;
+            }
+        }
+
+        int32_t s1 = sample->data[pos];
+        int32_t s2 = (pos+1 < end) ?
+            sample->data[pos+1] :
+            0;
+        int32_t si = lerpFixed(s1, s2, samplePos & 0xffff);
+        float s = (float)si * s8ToFloatRecp;
+
+
+        //float s1 = (float) sample->data[pos] * s8ToFloatRecp;
+        //float s2 = (pos+1 < end) ?
+        //    (float) sample->data[pos+1] * s8ToFloatRecp :
+        //    0.0f;
+        //float s = lerp(s1, s2, (float)((uint32_t)samplePos & 0xff) / 65535.f) ;
+    
+        s*= fltvol;
+        (*left++) += s;
+        (*right++) += s;
+        
+	    sum +=s*s;
+        samplePos += srcStep;
+        ++i;
+    }
+
+    return frameSize;
+}
+
+void Channel::setFineTune(int ftune)
+{
+    ft = ftune;
+}
+void Channel::setAmigaPeriod(int ap)
+{
+    amigaPeriod = ap;
+}
+void Channel::setVol(int v)
+{
+    vol = v;
+    gVoiceMgr.setVol(voiceHandle, v);
+}
+
 void Channel::setSample(Sample* s)
 {
     sample = s;
     samplePos = 0;
     ft = sample->fine_tune;
-}
 
-static const float s8ToFloatRecp = 1.f / 128.f;
-static const float vol64FloatRecp = 1.f / 64.f;
+    if( amigaPeriod <= 0)
+        return; 
+
+    if( voiceHandle > 0 )
+        gVoiceMgr.kill(voiceHandle);
+    
+    voiceHandle = gVoiceMgr.play(s, vol, amigaPeriodToHz(amigaPeriod), pan);
+}
 
 // render thread.
 int Channel::makeAudio(
@@ -190,6 +326,9 @@ int Channel::makeAudio(
     int frameSize,
     uint32_t sampleRate)
 {
+    // testing voice mgr.
+    //return 0;
+
     if( amigaPeriod <= 0)
         return 0;
     if( !sample )
@@ -258,6 +397,19 @@ int Channel::makeAudio(
     float avgPow = (float)sum / frameSize;
     vuDb = linearToDb(avgPow);
     return i;
+}
+
+void Channel::updateVoice()
+{
+    if( voiceHandle > 0)
+    {
+        int freq = amigaPeriod >= 0 ? amigaPeriodToHz(amigaPeriod) : -1;
+        int gain = vol;
+        gVoiceMgr.setX(voiceHandle,[freq,gain](Voice* v) {
+            v->vol = gain;
+            v->freq = freq >= 0 ? freq : v->freq;
+        });
+    }
 }
 
 void Mod::tick()
@@ -369,12 +521,13 @@ void Mod::updateRow()
                note.effect != Effect::Porta_Vol_Slide)  
            {
                 if( channel.sample)
-                    channel.ft = channel.sample->fine_tune;
+                    channel.setFineTune(channel.sample->fine_tune);
                 
                 int period = Channel::getAmigaFreq(note.noteOffset, channel.ft);
                 if( period > 0 )
                 {
-                    channel.amigaPeriod = period;
+                    channel.setAmigaPeriod(period);
+                    //channel.amigaPeriod = period;
 
                     // these all reset when a new note is played.
                     channel.vibrInv = false;
@@ -485,6 +638,8 @@ void Mod::updateRow()
         }
         // mute other channels. testing.
         if( devSoloChannel >= 0 && devSoloChannel != channelIdx)  channel.vol = 0;
+
+        channel.updateVoice();
     }
 }
 
@@ -590,6 +745,7 @@ void Mod::updateEffects()
 
         // mute other channels. testing.
         if( devSoloChannel >= 0 && devSoloChannel != channelIdx)  c.vol = 0;
+        c.updateVoice();
     }
 }
 
@@ -601,6 +757,8 @@ void Mod::updateEffects()
     int frameSize)
 {
     std::unique_lock<std::mutex> lk(cs);
+
+    gVoiceMgr.makeAudio(leftMix, rightMix, sampleRate, frameSize);
     
     int made = 0;
     for(int i = 0; i < nChannels; ++i)
@@ -644,16 +802,19 @@ static int patestCallback( const void *inputBuffer, void *outputBuffer,
         *out++ = *leftMix++;
         *out++ = *rightMix++;
     }
+
+#if WITH_DISPLAY
+
     // fft.
     for( int i=0;i < framesPerBuffer; ++i)
     {
-	gInBuff[i] = gLeftMix[i];
+    	gInBuff[i] = gLeftMix[i];
     }
     // han window.
     for( int i=0;i < framesPerBuffer; ++i)
     {
-	float multiplier = 0.5f * (1.f - cosf((float)2.f*M_PI*i/framesPerBuffer));
-	gInBuff[i]*=multiplier;
+    	float multiplier = 0.5f * (1.f - cosf((float)2.f*M_PI*i/framesPerBuffer));
+    	gInBuff[i]*=multiplier;
     }
     
     fftw_execute(gPlan);
@@ -661,11 +822,13 @@ static int patestCallback( const void *inputBuffer, void *outputBuffer,
     gPowerSpectrum[0] = gOutBuff[0][0]*gOutBuff[0][0];
     for( int i=1; i< (framesPerBuffer+1)/2; i++)
     {
-	float rl =gOutBuff[i][0];
-	float im =gOutBuff[i][1];
-	gPowerSpectrum[i] = (rl*rl) + (im*im);
+        float rl =gOutBuff[i][0];
+    	float im =gOutBuff[i][1];
+    	gPowerSpectrum[i] = (rl*rl) + (im*im);
     }
     gPowerSpectrum[framesPerBuffer/2] = gOutBuff[framesPerBuffer/2][0]*gOutBuff[framesPerBuffer][0];
+
+#endif //WITH_DISPLAY
 
     return 0;
 }
@@ -876,61 +1039,64 @@ void inputLoop()
     bool bQuit = false;
     while(!bQuit)
     {
-	int c = getch();
-	if( c == 'q' ) bQuit = true;
-	else if( c >= '0' && c <= '9' ) devSoloChannel = c-'0';
-	else if( c == 's' ) devSoloChannel=-1;
+        int c = getch();
+        if (c == 'q')
+            bQuit = true;
+        else if (c >= '0' && c <= '9')
+            devSoloChannel = c - '0';
+        else if (c == 's')
+            devSoloChannel = -1;
 
-	// draw vu
-	clear();
-	int y,x;
-	getmaxyx(stdscr,y,x);
+        // draw vu
+        clear();
+        int y, x;
+        getmaxyx(stdscr, y, x);
 
-	std::vector<float> l, r;
-	{	
-        	std::unique_lock<std::mutex> lk(gMixCs);
-		l = std::move(gLeftMix);
-		r = std::move(gRightMix);
-	}
-	if( r.size() > 0)
-	{	
-		int mid = y/2;
-		float pos = 0;
-		float step = x > 0 ? (float)(l.size()-1) / x : 0;
-		for(int i = 0; i < x; ++i, pos+=step )
-		{
-			//fprintf(stderr, "pos=%d, %f\n", (int)pos, pos);
-			pos = clamp(0.0f, (float)l.size()-1, pos);	
-			float s = r[(int)pos];
-			s = fabs(s);
-			int starty = (float)mid * s;
-			//mvvline(mid-starty,i, 0, starty*2);
-		}
+        std::vector<float> l, r;
+        {
+            std::unique_lock<std::mutex> lk(gMixCs);
+            l = std::move(gLeftMix);
+            r = std::move(gRightMix);
+        }
+        if (r.size() > 0)
+        {
+            int mid = y / 2;
+            float pos = 0;
+            float step = x > 0 ? (float)(l.size() - 1) / x : 0;
+            for (int i = 0; i < x; ++i, pos += step)
+            {
+                //fprintf(stderr, "pos=%d, %f\n", (int)pos, pos);
+                pos = clamp(0.0f, (float)l.size() - 1, pos);
+                float s = r[(int)pos];
+                s = fabs(s);
+                int starty = (float)mid * s;
+                //mvvline(mid-starty,i, 0, starty*2);
+            }
 
-		for( int i = 0; i < gMod.nChannels; ++i )
-		{
-			float nvu = fabs(norm(-96.f, 0, gMod.channels[i].vuDb));
-			float wid = (float) (1.f - nvu) * x; 
-			mvhline(i, 0, 0, wid);
-			//float wid = (float) (1.f - nvu) * y; 
-			//mvvline(y-wid, i, 0, wid);
-		}
-		
-		for( int i = 0; i < x; ++i )
-		{
-		    float posx = ((float)i / x)*(float)(kFrameSize/4+1);
-		    float p = gPowerSpectrum[(int)posx];
-		    float pl = linearToDb(p);
-		    //float nvu = norm(-96,0,pl);
-		    float nvu = fabs(norm(0, 100, pl));
-		    //float wid = (float) (1.f-nvu) * (y/4); 
-		    float wid = (float) (nvu) * y; 
-		    mvvline(y-wid,i, 0, wid);
-		}
-	}
+            for (int i = 0; i < gMod.nChannels; ++i)
+            {
+                float nvu = fabs(norm(-96.f, 0, gMod.channels[i].vuDb));
+                float wid = (float)(1.f - nvu) * x;
+                mvhline(i, 0, 0, wid);
+                //float wid = (float) (1.f - nvu) * y;
+                //mvvline(y-wid, i, 0, wid);
+            }
 
-	usleep(30000);
-	refresh();
+            for (int i = 0; i < x; ++i)
+            {
+                float posx = ((float)i / x) * (float)(kFrameSize / 4 + 1);
+                float p = gPowerSpectrum[(int)posx];
+                float pl = linearToDb(p);
+                //float nvu = norm(-96,0,pl);
+                float nvu = fabs(norm(0, 100, pl));
+                //float wid = (float) (1.f-nvu) * (y/4);
+                float wid = (float)(nvu)*y;
+                mvvline(y - wid, i, 0, wid);
+            }
+        }
+
+        usleep(30000);
+        refresh();
     }
 }
 
@@ -976,10 +1142,12 @@ int main(int argc, char** argv)
     ERR_WRAP(Pa_StartStream( stream ));
     timer_start([&]{gMod.tick();}, 18);
 
+#if WITH_DISPLAY
     initFft(kFrameSize);
     initGfx();
     clear();
     refresh();
+#endif //WITH_DISPLAY
 
     inputLoop();
     
@@ -987,8 +1155,12 @@ int main(int argc, char** argv)
 
     ERR_WRAP(Pa_StopStream( stream ));
     ERR_WRAP(Pa_Terminate());
+
+#if WITH_DISPLAY
     deinitGfx();
     deinitFft();
+#endif //WITH_DISPLAY
+
     return 0;
 
 error:

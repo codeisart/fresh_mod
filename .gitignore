@@ -1,7 +1,12 @@
-.vscode/*
+.vscode/
+*.dSYM/
+.DS_Store/
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
 *.code-workspace
-*.dSYM/*
+.cache/
+*.swp
+./freshmod
+
