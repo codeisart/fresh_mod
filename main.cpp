@@ -21,7 +21,7 @@
 #include "portaudio.h"
 #include "util.h"
 
-#define WITH_DISPLAY (1)
+#define WITH_DISPLAY (0)
 
 static const float s8ToFloatRecp = 1.f / 128.f;
 static const float vol64FloatRecp = 1.f / 64.f;
@@ -37,8 +37,8 @@ std::vector<float> gLeftMix;
 std::vector<float> gRightMix;
 
 // solo for debugging.
-int devSoloChannel = -1;
-int devSoloPattern = -1;
+int devSoloChannel = -1; 
+int devSoloPattern = -1; 
 
 // fftw
 double* gInBuff=nullptr;
@@ -185,10 +185,10 @@ size_t VoiceMgr::makeAudio(
     int frameSize)
 {
     {
-	    std::lock_guard<std::mutex> guard(cmdsCs);
-	    for(auto i:cmds)
-	        i();
-    	cmds.clear();
+	std::lock_guard<std::mutex> guard(cmdsCs);
+	for(auto i:cmds)
+	    i();
+	cmds.clear();
     }
     for(Voices::iterator i = playing.begin(); i!= playing.end(); ) 
     {
@@ -225,15 +225,20 @@ size_t Voice::makeAudio(
     uint32_t sampleRate,
     int frameSize)
 {
+    return 0; // testing
+
     if( !sample )
         return 0;
-    if( samplePos == ~0)
+    if( samplePos < 0.f)
         return 0;
 
-    uint32_t srcStep = (uint64_t)(freq << 16) / sampleRate;
-    //float srcStep = freq / (double)sampleRate;
+    float oneOverSampleRate = 1.f / (float)sampleRate;
 
-    float end = sample->loop_length > 0 ?
+    //uint32_t srcStep = (uint64_t)(freq << 16) / sampleRate;
+    float srcStep = (float)freq * oneOverSampleRate;
+
+    bool bLooping = sample->loop_length > 0;
+    int end = bLooping ?
                 sample->loop_start + sample->loop_length :
                 sample->length;
 
@@ -242,49 +247,43 @@ size_t Voice::makeAudio(
     float fltvol = (float)vol * vol64FloatRecp;
 
     // too sleepy, think about this properly.
-    float fltLeftPan  = Abs(Min(0, pan)) * vol64FloatRecp;
-    float fltRightPan = Max(0, pan) * vol64FloatRecp; 
+    float fltLeftPan  = 1.f; //Abs(Min(0, pan)) * vol64FloatRecp;
+    float fltRightPan = 1.f;// Max(0, pan) * vol64FloatRecp; 
 
-    int i = 0; 
     float sum = 0.f;
-    while( i < frameSize )
+    for(int i = 0; i < frameSize; i++)
     {
-        int pos = samplePos>>16;
-
         // handle end of sample.
-        if( pos >= end )
+        if( samplePos >= end )
         {
             // looping?
-            if( sample->loop_length > 0)
-                samplePos = (uint32_t)sample->loop_start << 16;
+            if(bLooping)
+                samplePos = sample->loop_start;
             else 
             {
-                samplePos = ~0;
+                samplePos = -1.f;
                 break;
             }
         }
 
-        int32_t s1 = sample->data[pos];
-        int32_t s2 = (pos+1 < end) ?
-            sample->data[pos+1] :
-            0;
-        int32_t si = lerpFixed(s1, s2, samplePos & 0xffff);
-        float s = (float)si * s8ToFloatRecp;
+	int pos = (int)samplePos;
+	int next = pos+1 < end ? pos+1 : bLooping ? sample->loop_start : pos;
 
+	float s = sample->data[pos];//*s8ToFloatRecp;
 
-        //float s1 = (float) sample->data[pos] * s8ToFloatRecp;
-        //float s2 = (pos+1 < end) ?
-        //    (float) sample->data[pos+1] * s8ToFloatRecp :
+        //float s1 = (float) sample->data[samplePos] * s8ToFloatRecp;
+        //float s2 = (samplePos+1 < end) ?
+        //    (float) sample->data[samplePos+1] * s8ToFloatRecp :
         //    0.0f;
-        //float s = lerp(s1, s2, (float)((uint32_t)samplePos & 0xff) / 65535.f) ;
+	//float blend = samplePos-floor(samplePos);
+        //float s = lerp(s1, s2, blend);
     
         s*= fltvol;
         (*left++) += s;
         (*right++) += s;
         
-	    sum +=s*s;
+	sum +=s*s;
         samplePos += srcStep;
-        ++i;
     }
 
     return frameSize;
@@ -333,12 +332,12 @@ int Channel::makeAudio(
         return 0;
     if( !sample )
         return 0;
-    if( samplePos == ~0)
+    if( samplePos == -1.f)
         return 0;
 
     uint32_t freq = amigaPeriodToHz(amigaPeriod);
-    uint32_t srcStep = (uint64_t)(freq << 16) / sampleRate;
-    //float srcStep = freq / (double)sampleRate;
+    //uint32_t srcStep = (uint64_t)(freq << 16) / sampleRate;
+    float srcStep = freq / (double)sampleRate;
 
     float end = sample->loop_length > 0 ?
                 sample->loop_start + sample->loop_length :
@@ -356,34 +355,34 @@ int Channel::makeAudio(
     float sum = 0.f;
     while( i < frameSize )
     {
-        int pos = samplePos>>16;
-
         // handle end of sample.
-        if( pos >= end )
+        if( samplePos >= end )
         {
             // looping?
             if( sample->loop_length > 0)
-                samplePos = (uint32_t)sample->loop_start << 16;
+                samplePos = sample->loop_start;
             else 
             {
-                samplePos = ~0;
+                samplePos = -1;
                 break;
             }
         }
 
-        int32_t s1 = sample->data[pos];
+        /*
+	int32_t s1 = sample->data[pos];
         int32_t s2 = (pos+1 < end) ?
             sample->data[pos+1] :
             0;
         int32_t si = lerpFixed(s1, s2, samplePos & 0xffff);
         float s = (float)si * s8ToFloatRecp;
+	*/
 
-
-        //float s1 = (float) sample->data[pos] * s8ToFloatRecp;
-        //float s2 = (pos+1 < end) ?
-        //    (float) sample->data[pos+1] * s8ToFloatRecp :
-        //    0.0f;
-        //float s = lerp(s1, s2, (float)((uint32_t)samplePos & 0xff) / 65535.f) ;
+        float s1 = (float) sample->data[samplePos];
+        float s2 = (samplePos+1 < end) ?
+            (float) sample->data[samplePos+1] :
+            0.0f;
+	float blend = samplePos - floor(samplePos);
+        float s = s1;//lerp(s1, s2, blend) ;
     
         s*= fltvol;
         (*left++) += s;
@@ -506,7 +505,7 @@ void Mod::updateRow()
 
         bool bDelayNote = note.effect == Effect::Sub_Effect && static_cast<EffectSubType>(note.eparm >> 4) == EffectSubType::Delay_Note;
 
-        //prettyPrintNote(&note, channelIdx, nChannels, currentRow);
+        prettyPrintNote(&note, channelIdx, nChannels, currentRow);
         if( note.sampleNumber && !bDelayNote)
         {
             Sample* smpl = &samples[note.sampleNumber];
@@ -578,7 +577,7 @@ void Mod::updateRow()
             break;
         }
         case Effect::Sample_Offset:
-            channel.samplePos = (note.eparm * 0x100) << 16;
+            channel.samplePos = (float)((uint32_t)note.eparm * 0x100);
             break;
         case Effect::Volume_Slide:
             startVolSlide(channel, note);
@@ -758,7 +757,6 @@ void Mod::updateEffects()
 {
     std::unique_lock<std::mutex> lk(cs);
 
-    gVoiceMgr.makeAudio(leftMix, rightMix, sampleRate, frameSize);
     
     int made = 0;
     for(int i = 0; i < nChannels; ++i)
@@ -767,7 +765,10 @@ void Mod::updateEffects()
         made = Max(made, c.makeAudio(leftMix, rightMix, frameSize, sampleRate));
     }
 
+    gVoiceMgr.makeAudio(leftMix, rightMix, sampleRate, frameSize);
+
     // Apply master volume.
+    
     float masterVolRecp = (float)1.f / nChannels;
     float* l = leftMix.data();
     float* r = rightMix.data();
@@ -776,6 +777,7 @@ void Mod::updateEffects()
         *l++ *= masterVolRecp;
         *r++ *= masterVolRecp;
     }
+   
 
     return made;
 }
@@ -976,18 +978,22 @@ bool loadMod(void* mem, size_t size)
         if( s.length > 0 )
         {
             samples -= s.length;
+	    s.data.resize(s.length);
+            //s.data = (int8_t*)malloc(s.length);
+            //memcpy(s.data, samples, s.length);
+	    for(int j=0; j<s.length; ++j)
+		s.data[j]=(float)s8ToFloatRecp*samples[j];
 
-            s.data = (int8_t*)malloc(s.length);
-            memcpy(s.data, samples, s.length);
-/*
+	    /*
             std::stringstream ss;
             ss << "smp_" << i << ".raw";
             if( FILE* fp = fopen(ss.str().c_str(), "wb"))
             {
-                fwrite(s.data, s.length, 1, fp);
+                fwrite(s.data.data(), s.length, sizeof(float), fp);
                 fclose(fp);
             }
-            */
+	    */
+            
         }
     }
 
@@ -1032,7 +1038,7 @@ float norm(float min, float max, float v)
 	return c*recp;
 }
 
-int min(int a, int b) { return a > b ? b : a; }
+int min(int a, int b) { return a < b ? a : b; }
 
 void inputLoop()
 {

@@ -58,7 +58,7 @@ struct Sample
    int volume = 0;
    int loop_start = 0;
    int loop_length = 0; 
-   int8_t* data = nullptr;
+   std::vector<float> data;
 };
 
 struct Note
@@ -73,7 +73,7 @@ struct Voice
 {
     int id = 0;
     Sample* sample = nullptr;    
-    uint32_t samplePos = ~0; // fixed point, unsigned 16:16
+    float samplePos = 0; 
     int vol = 0;
     int pan = 0;
     int freq = 0;
@@ -143,7 +143,7 @@ struct VoiceMgr
 
 struct Channel
 {
-    uint32_t samplePos = ~0; // fixed point, unsigned 16:16
+    float samplePos = 0; 
     int vol = 0;
     int ft = 0;
     int pan = 0;
