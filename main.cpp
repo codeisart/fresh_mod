@@ -29,7 +29,6 @@ static const char* notestr[] = {"C-", "C#", "D-", "D#","E-", "F-", "F#", "G-","G
 extern const uint16_t gNotes[];
 extern const uint8_t sine_table[32];
 Mod gMod;
-VoiceMgr gVoiceMgr;
 
 // mix buffers.
 std::mutex gMixCs;
@@ -178,117 +177,6 @@ void timer_start(std::function<void(void)> func, unsigned int interval)
   }).detach();
 }
 
-size_t VoiceMgr::makeAudio(
-    std::vector<float>& leftMix,
-    std::vector<float>& rightMix,
-    uint32_t sampleRate,
-    int frameSize)
-{
-    {
-	std::lock_guard<std::mutex> guard(cmdsCs);
-	for(auto i:cmds)
-	    i();
-	cmds.clear();
-    }
-    for(Voices::iterator i = playing.begin(); i!= playing.end(); ) 
-    {
-        (*i)->makeAudio(leftMix, rightMix, sampleRate, frameSize);
-        if ((*i)->bDying)
-        {
-            //dying.push_back(*i);
-            i = playing.erase(i);
-        }
-        else
-        {
-            ++i;
-        }
-    }
-    for (Voices::iterator i = dying.begin(); i != dying.end(); )  
-    {
-        (*i)->makeAudio(leftMix, rightMix, sampleRate, frameSize);
-        if ((*i)->bDead)
-        {
-            i = dying.erase(i);
-        }
-        else
-        {
-            ++i;
-        }
-    }
-
-    return frameSize;
-}
-
-size_t Voice::makeAudio(
-    std::vector<float> &mixLeft,
-    std::vector<float> &mixRight,
-    uint32_t sampleRate,
-    int frameSize)
-{
-    return 0; // testing
-
-    if( !sample )
-        return 0;
-    if( samplePos < 0.f)
-        return 0;
-
-    float oneOverSampleRate = 1.f / (float)sampleRate;
-
-    //uint32_t srcStep = (uint64_t)(freq << 16) / sampleRate;
-    float srcStep = (float)freq * oneOverSampleRate;
-
-    bool bLooping = sample->loop_length > 0;
-    int end = bLooping ?
-                sample->loop_start + sample->loop_length :
-                sample->length;
-
-    float* left = mixLeft.data();
-    float* right = mixRight.data();
-    float fltvol = (float)vol * vol64FloatRecp;
-
-    // too sleepy, think about this properly.
-    float fltLeftPan  = 1.f; //Abs(Min(0, pan)) * vol64FloatRecp;
-    float fltRightPan = 1.f;// Max(0, pan) * vol64FloatRecp; 
-
-    float sum = 0.f;
-    for(int i = 0; i < frameSize; i++)
-    {
-        // handle end of sample.
-        if( samplePos >= end )
-        {
-            // looping?
-            if(bLooping)
-                samplePos = sample->loop_start;
-            else 
-            {
-                samplePos = -1.f;
-                break;
-            }
-        }
-
-	int pos = (int)samplePos;
-	int next = pos+1 < end ? pos+1 : bLooping ? sample->loop_start : pos;
-
-	float s = sample->data[pos];//*s8ToFloatRecp;
-
-        //float s1 = (float) sample->data[samplePos] * s8ToFloatRecp;
-        //float s2 = (samplePos+1 < end) ?
-        //    (float) sample->data[samplePos+1] * s8ToFloatRecp :
-        //    0.0f;
-	//float blend = samplePos-floor(samplePos);
-        //float s = lerp(s1, s2, blend);
-    
-        s*= fltvol;
-        (*left++) += s;
-        (*right++) += s;
-        
-	sum +=s*s;
-        samplePos += srcStep;
-    }
-
-    return frameSize;
-}
-
 void Channel::setFineTune(int ftune)
 {
     ft = ftune;
@@ -300,7 +188,6 @@ void Channel::setAmigaPeriod(int ap)
 void Channel::setVol(int v)
 {
     vol = v;
-    gVoiceMgr.setVol(voiceHandle, v);
 }
 
 void Channel::setSample(Sample* s)
@@ -311,11 +198,6 @@ void Channel::setSample(Sample* s)
 
     if( amigaPeriod <= 0)
         return; 
-
-    if( voiceHandle > 0 )
-        gVoiceMgr.kill(voiceHandle);
-    
-    voiceHandle = gVoiceMgr.play(s, vol, amigaPeriodToHz(amigaPeriod), pan);
 }
 
 // render thread.
@@ -405,19 +287,6 @@ int Channel::makeAudio(
     float avgPow = (float)sum / blockSize;
     vuDb = linearToDb(avgPow);
     return i;
-}
-
-void Channel::updateVoice()
-{
-    if( voiceHandle > 0)
-    {
-        int freq = amigaPeriod >= 0 ? amigaPeriodToHz(amigaPeriod) : -1;
-        int gain = vol;
-        gVoiceMgr.setX(voiceHandle,[freq,gain](Voice* v) {
-            v->vol = gain;
-            v->freq = freq >= 0 ? freq : v->freq;
-        });
-    }
 }
 
 void Mod::tick()
@@ -646,8 +515,6 @@ void Mod::updateRow()
         }
         // mute other channels. testing.
         if( devSoloChannel >= 0 && devSoloChannel != channelIdx)  channel.vol = 0;
-
-        channel.updateVoice();
     }
 }
 
@@ -753,7 +620,6 @@ void Mod::updateEffects()
 
         // mute other channels. testing.
         if( devSoloChannel >= 0 && devSoloChannel != channelIdx)  c.vol = 0;
-        c.updateVoice();
     }
 }
 
@@ -773,8 +639,6 @@ void Mod::updateEffects()
         Channel& c = channels[i];
         made = Max(made, c.makeAudio(leftMix, rightMix, frameSize, sampleRate));
     }
-
-    gVoiceMgr.makeAudio(leftMix, rightMix, sampleRate, frameSize);
 
     // Apply master volume.
     
