@@ -322,7 +322,7 @@ void Channel::setSample(Sample* s)
 int Channel::makeAudio(
     std::vector<float>& leftMix,
     std::vector<float>& rightMix,
-    int frameSize,
+    int blockSize,
     uint32_t sampleRate)
 {
     // testing voice mgr.
@@ -345,21 +345,25 @@ int Channel::makeAudio(
 
     float* left = leftMix.data();
     float* right = rightMix.data();
-    float fltvol = (float)vol * vol64FloatRecp;
+    float fltVol = (float)vol * vol64FloatRecp;
+    float fltPan = ((float)(pan + 128)/256.f) - 0.5f;
+    bool bLooping = sample->loop_length > 0; 
 
-    // too sleepy, think about this properly.
-    float fltLeftPan  = Abs(Min(0, pan)) * vol64FloatRecp;
-    float fltRightPan = Max(0, pan) * vol64FloatRecp; 
+    // square law panning.
+    float sqrPowLeft = fltPan+1.f;
+    float gainLeft = 1.f - 0.25f * (sqrPowLeft*sqrPowLeft);
+    float sqrPowRight = 0.5f*fltPan-0.5f;
+    float gainRight = 1.f - (sqrPowRight*sqrPowRight);
 
     int i = 0; 
     float sum = 0.f;
-    while( i < frameSize )
+    while( i < blockSize )
     {
         // handle end of sample.
         if( samplePos >= end )
         {
             // looping?
-            if( sample->loop_length > 0)
+            if( bLooping )
                 samplePos = sample->loop_start;
             else 
             {
@@ -368,32 +372,37 @@ int Channel::makeAudio(
             }
         }
 
-        /*
-	int32_t s1 = sample->data[pos];
-        int32_t s2 = (pos+1 < end) ?
-            sample->data[pos+1] :
-            0;
-        int32_t si = lerpFixed(s1, s2, samplePos & 0xffff);
-        float s = (float)si * s8ToFloatRecp;
-	*/
+        // Break out fractional+int parts
+        double intPos = 0.f;
+        double fractPos = modf(samplePos, &intPos);
+        int samplePosInt = (int)intPos;
+        int nextSamplePos = samplePosInt+1;
 
-        float s1 = (float) sample->data[samplePos];
-        float s2 = (samplePos+1 < end) ?
-            (float) sample->data[samplePos+1] :
-            0.0f;
-	float blend = samplePos - floor(samplePos);
-        float s = s1;//lerp(s1, s2, blend) ;
+        // calculate next sample.
+        if( nextSamplePos >= end)
+        {
+            if(bLooping)
+                nextSamplePos = sample->loop_start;   
+            else
+                nextSamplePos = samplePosInt;
+        }
+
+        float s1 = (float) sample->data[samplePosInt];
+        float s2 = (float) sample->data[nextSamplePos];
+        float s = lerp(s1, s2, fractPos);
     
-        s*= fltvol;
-        (*left++) += s;
-        (*right++) += s;
+        float ls = s1 * gainLeft * fltVol;
+        float rs = s1 * gainRight * fltVol;
+
+        (*left++) += ls;
+        (*right++) += rs;
         
-	sum +=s*s;
-        samplePos += srcStep;
+	    sum +=s*s;
+        samplePos += srcStep;  
         ++i;
     }
 
-    float avgPow = (float)sum / frameSize;
+    float avgPow = (float)sum / blockSize;
     vuDb = linearToDb(avgPow);
     return i;
 }
