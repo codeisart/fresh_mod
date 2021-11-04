@@ -169,6 +169,33 @@ main.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/fresh_mod.dir/build.make CMakeFiles/fresh_mod.dir/main.cpp.s
 .PHONY : main.cpp.s
 
+mod.o: mod.cpp.o
+
+.PHONY : mod.o
+
+# target to build an object file
+mod.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/fresh_mod.dir/build.make CMakeFiles/fresh_mod.dir/mod.cpp.o
+.PHONY : mod.cpp.o
+
+mod.i: mod.cpp.i
+
+.PHONY : mod.i
+
+# target to preprocess a source file
+mod.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/fresh_mod.dir/build.make CMakeFiles/fresh_mod.dir/mod.cpp.i
+.PHONY : mod.cpp.i
+
+mod.s: mod.cpp.s
+
+.PHONY : mod.s
+
+# target to generate assembly for a file
+mod.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/fresh_mod.dir/build.make CMakeFiles/fresh_mod.dir/mod.cpp.s
+.PHONY : mod.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -181,6 +208,9 @@ help:
 	@echo "... main.o"
 	@echo "... main.i"
 	@echo "... main.s"
+	@echo "... mod.o"
+	@echo "... mod.i"
+	@echo "... mod.s"
 .PHONY : help
 
 

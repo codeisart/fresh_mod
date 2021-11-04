@@ -18,7 +18,7 @@ IF( EXISTS "${CMAKE_CURRENT_BINARY_DIR}/compile_commands.json" )
 ENDIF()
 
 # add the executable
-add_executable(fresh_mod main.cpp)
+add_executable(fresh_mod main.cpp mod.cpp)
 
 find_library(fftw NAMES libfftw3.a)
 find_library(ncurses NAMES libncurses.a)

@@ -11,6 +11,18 @@
 
 extern const uint16_t gNotes[];
 
+inline uint16_t findOffsetFromPeriod(int amigaFreq)
+{    
+    if( amigaFreq <= 0) return 0;
+    const uint16_t* normal = gNotes+(12*3*8); // offset to normal range.
+    for(int i = 0; i < 12*3; ++i)
+    {
+        if(amigaFreq >= normal[i])
+            return i+1+(12*3*8);
+    }
+    return 0;
+}
+
 enum class Effect : uint8_t
 {
     Arpeggio = 0,
@@ -179,3 +191,11 @@ struct Mod
         std::vector<float>& mixRight,
         uint32_t sampleRate, int frameSize);
 }; 
+
+extern Mod gMod;
+extern int devSoloChannel; 
+extern int devSoloPattern; 
+extern bool loadMod(const char* filename);
+extern void prettyPrintNote(Note* note, int channel, int nChannels, int row);
+extern const uint8_t sine_table[32];
+extern const char* notestr[];

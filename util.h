@@ -1,5 +1,78 @@
 #pragma once
 
+#include <math.h>
+#include <functional>
+#include <chrono>
+#include <thread>
+
+inline float norm(float min, float max, float v)
+{
+	float c = v < min ? min : v > max ? max : v;
+	float recp = 1.f / (max-min);
+	return c*recp;
+}
+
+inline int min(int a, int b) { return a < b ? a : b; }
+
+// This is a fast approximation to log2()
+// Y = C[0]*F*F*F + C[1]*F*F + C[2]*F + C[3] + E;
+inline float log2f_approx(float X) {
+  float Y, F;
+  int E;
+  F = frexpf(fabsf(X), &E);
+  Y = 1.23149591368684f;
+  Y *= F;
+  Y += -4.11852516267426f;
+  Y *= F;
+  Y += 6.02197014179219f;
+  Y *= F;
+  Y += -3.13396450166353f;
+  Y += E;
+  return(Y);
+}
+
+//log10f is exactly log2(x)/log2(10.0f)
+#define log10f_fast(x)  (log2f_approx(x)*0.3010299956639812f)
+
+inline float linearToDb(float f)
+{
+    static const float kSmallNumber = 1.e-8f;
+    if( f > kSmallNumber )
+    	return 20.f * log10f_fast(f); //log10f(f);
+    
+    return -96.f;
+}
+template<typename T> inline T clamp(T mn, T mx, T v) { return v <  mn ? mn : v > mx ? mx : v; }
+
+inline float lerp( float s1, float s2, float t )
+{
+    float d = s2-s1;
+    float l = s1 + (d*t);    
+    return l;
+}
+
+inline int32_t lerpFixed( int32_t s1, int32_t s2, uint32_t t)
+{
+    int32_t d = (s2-s1) << 16;
+    int32_t p = ((int64_t)(d*t) / (1 << 16)); 
+    int32_t l = s1 + (p / (1 << 16));
+    return l;
+    // fp_fract 0...65535 (0...100)
+    //uint32_t (65535 - fp_fract);
+}
+
+inline void timer_start(std::function<void(void)> func, unsigned int interval)
+{
+  std::thread([func, interval]()
+  { 
+    while (true)
+    { 
+      auto x = std::chrono::steady_clock::now() + std::chrono::milliseconds(interval);
+      func();
+      std::this_thread::sleep_until(x);
+    }
+  }).detach();
+}
 
 template<typename T> T Max(T a,T b) { return a > b ? a : b; }
 template<typename T> T Min(T a,T b) { return a < b ? a : b; }
@@ -43,6 +116,7 @@ struct RingBuffer
     bool isFull() const { return increment(head) == tail; }
 };
 
+#if TESTING_MOFO
 void testCircbuffer()
 {
     // test 1. write 
@@ -124,3 +198,4 @@ void testCircbuffer()
         }
     }
 }
+#endif //TESTING_MOFO
