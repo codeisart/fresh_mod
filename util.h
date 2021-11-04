@@ -4,6 +4,30 @@
 #include <functional>
 #include <chrono>
 #include <thread>
+#include <string>
+
+template<typename Loader>
+inline bool loadWholeFile(const char* filename, Loader loader)
+{
+    if( FILE* fp = fopen(filename, "rb") )
+    {
+        fseek(fp,  0, SEEK_END);
+        size_t size = ftell(fp);
+        void* mem = malloc(size);
+        fseek(fp,0, SEEK_SET);
+        fread(mem, size, 1, fp);
+        bool bSuccess = loader(mem, size);
+        free(mem);
+        return bSuccess;
+    }
+    return false;
+}
+
+inline bool ends_with(std::string const & value, std::string const & ending)
+{
+    if (ending.size() > value.size()) return false;
+    return std::equal(ending.rbegin(), ending.rend(), value.rbegin());
+}
 
 inline float norm(float min, float max, float v)
 {

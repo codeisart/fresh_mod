@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <vector>
 
+#include "plm.h"
 #include "mod.h"
 #include "portaudio.h"
 #include "util.h"
@@ -202,6 +203,16 @@ void inputLoop()
     }
 }
 
+bool loadModule(const std::string& filename)
+{   
+    if(ends_with(filename, ".mod"))
+        return loadMod(filename.c_str());
+    else if(ends_with(filename, ".plm"))
+        return loadPlm(filename.c_str());
+    
+    return false;
+}
+
 int main(int argc, char** argv)
 {
     if( argc <= 1 )
@@ -209,9 +220,9 @@ int main(int argc, char** argv)
         printf("please supply a mod filename.\n");
         return -1;
     }
-    if( !loadMod(argv[1]))
+    if( !loadModule(argv[1]))
     {
-        printf("failed to load mod file '%s'\n", argv[1]);
+        printf("failed to load file '%s'\n", argv[1]);
         return -1;
     }
 

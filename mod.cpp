@@ -662,25 +662,13 @@ void Mod::updateEffects()
         *l++ *= masterVolRecp;
         *r++ *= masterVolRecp;
     }
-   
-
     return made;
 }
 
 bool loadMod(const char* filename)
 {
-    if( FILE* fp = fopen(filename, "rb") )
-    {
-        fseek(fp,  0, SEEK_END);
-        size_t size = ftell(fp);
-        void* mem = malloc(size);
-        fseek(fp,0, SEEK_SET);
-        fread(mem, size, 1, fp);
-        bool bSuccess = loadMod(mem, size);
-        free(mem);
-        return bSuccess;
-    }
-    return false;
+    printf("loading mod... ");
+    return loadWholeFile(filename, [](void* mem, size_t size) -> bool { return loadMod(mem,size); });
 }
 
 void offsetToFancyNote(int offset, int& semi, int& oct, int& ft)
